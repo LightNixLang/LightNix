@@ -67,9 +67,9 @@ mod grammar {
                                | "true"
                                | "false"
                                | "null"
-        array              ::= "[" [ lf_or_comma ] { value lf_or_comma } "]"
+        array              ::= "[" [ lf ] { value lf_or_comma } "]"
 
-        function_call      ::= "(" [ lf_or_comma ] { expression lf_or_comma } ")"
+        function_call      ::= "(" [ lf ] { expression lf_or_comma } ")"
 
         type_info          ::= literal [ "<" type_info ">" ]
 
