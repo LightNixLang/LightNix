@@ -75,6 +75,10 @@ pub enum TokenKind {
     Colon,
     /// =
     Equal,
+    /// ,
+    Comma,
+    /// ;
+    Semicolon,
     /// (
     ParenthesisLeft,
     /// )
@@ -89,7 +93,7 @@ pub enum TokenKind {
     BracketRight,
     /// |
     VerticalLine,
-    /// e.g. -6.3, +5E+2
+    /// e.g. 6.3, 5E+2
     FloatNumeric,
     /// e.g. literal
     Literal,
@@ -146,6 +150,8 @@ static TOKENIZERS: &[Tokenizer] = &[
     Tokenizer::Keyword(TokenKind::Dot, "."),
     Tokenizer::Keyword(TokenKind::Colon, ":"),
     Tokenizer::Keyword(TokenKind::Equal, "="),
+    Tokenizer::Keyword(TokenKind::Comma, ","),
+    Tokenizer::Keyword(TokenKind::Semicolon, ";"),
     Tokenizer::Keyword(TokenKind::VerticalLine, "|"),
     // Delimiters
     Tokenizer::Keyword(TokenKind::ParenthesisLeft, "("),
@@ -168,10 +174,10 @@ static TOKENIZERS: &[Tokenizer] = &[
     // 1_000.25
     Tokenizer::Regex(
         TokenKind::FloatNumeric,
-        r"[+-]?[\d_]+(?:\.[\d_]+)?(?:[eE][+-]?[\d_]+)?",
+        r"[\d_]+(?:\.[\d_]+)?(?:[eE][+-]?[\d_]+)?",
     ),
     // Identifier
-    Tokenizer::Regex(TokenKind::Literal, r"(?:\w|-)+"),
+    Tokenizer::Regex(TokenKind::Literal, r"\w+"),
     // String literals
     Tokenizer::Regex(TokenKind::StringLiteral, r#""(?:[^"\\]|\\.)*""#),
     Tokenizer::Regex(TokenKind::StringLiteral, r"'(?:[^'\\]|\\.)*'"),

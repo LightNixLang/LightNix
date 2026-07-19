@@ -85,6 +85,7 @@ pub enum Statement<'input, 'allocator> {
     LetStatement(&'allocator LetStatement<'input, 'allocator>),
     AssignStatement(&'allocator AssignStatement<'input, 'allocator>),
     FunctionDefine(&'allocator FunctionDefine<'input, 'allocator>),
+    Expression(&'allocator Expression<'input, 'allocator>),
 }
 
 impl AST for Statement<'_, '_> {
@@ -98,6 +99,7 @@ impl AST for Statement<'_, '_> {
             Self::LetStatement(node) => node.span(),
             Self::AssignStatement(node) => node.span(),
             Self::FunctionDefine(node) => node.span(),
+            Self::Expression(node) => node.span(),
         }
     }
 }
@@ -249,7 +251,7 @@ pub struct Block<'input, 'allocator> {
 impl_ast!(impl<'input, 'allocator> for Block<'input, 'allocator>);
 
 /// Expression precedence is resolved by the parser and normalized into this tree.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum Expression<'input, 'allocator> {
     If(&'allocator IfExpression<'input, 'allocator>),
     Return(&'allocator ReturnExpression<'input, 'allocator>),
@@ -357,6 +359,7 @@ impl_ast!(impl<'input, 'allocator> for UnaryExpression<'input, 'allocator>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UnaryOperator {
+    Positive,
     Negate,
 }
 

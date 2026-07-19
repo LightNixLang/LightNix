@@ -57,7 +57,7 @@ mod grammar {
         les_or_gre_expr    ::= add_or_sub_expr [ ( "<" | ">" | "<=" | ">=" ) add_or_sub_expr ]
         add_or_sub_expr    ::= mul_or_div_expr { ( "+" | "-" ) mul_or_div_expr }
         mul_or_div_expr    ::= factor { ( "*" | "/" ) factor }
-        factor             ::= "-" primary | primary
+        factor             ::= ( "+" | "-" ) primary | primary
 
         primary            ::= value { ( "." | "->" | "::" ) [ lf ] literal [ function_call ] }
         value              ::= array
@@ -76,7 +76,7 @@ mod grammar {
         literal            ::= r"\w+"
 
         numeric_literal    ::= float_numeric
-        float_numeric      ::= r"[+-]?[\d_]+(\.[\d_]+)?([eE][+-][\d_]+)?" | "inf" | "nan"
+        float_numeric      ::= r"[\d_]+(\.[\d_]+)?([eE][+-]?[\d_]+)?" | "inf" | "nan"
         
         string_literal     ::= r#""([^"\\]|\\.)*""# | r"'([^'\\]|\\.)*'"
 
