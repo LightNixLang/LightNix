@@ -192,7 +192,8 @@ impl_ast!(impl<'input, 'allocator> for HostDefine<'input, 'allocator>);
 pub struct LetStatement<'input, 'allocator> {
     pub tunable: bool,
     pub name: Literal<'input>,
-    pub value: &'allocator Expression<'input, 'allocator>,
+    pub type_info: Option<&'allocator TypeInfo<'input, 'allocator>>,
+    pub value: Option<&'allocator Expression<'input, 'allocator>>,
     pub span: Range<usize>,
 }
 

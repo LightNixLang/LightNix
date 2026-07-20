@@ -660,31 +660,55 @@ fn parse_let_statement<'input, 'allocator>(
         return None;
     };
 
-    if current_kind(lexer) != TokenKind::Equal {
-        errors.push(error_here(
-            ParseErrorKind::InvalidLetStatement,
-            lexer,
-            Expected::Token(TokenKind::Equal),
-            Scope::LetStatement,
-        ));
-        return None;
-    }
-    lexer.next();
-    skip_line_feed(lexer);
+    let type_info = if current_kind(lexer) == TokenKind::Colon {
+        lexer.next();
 
-    let Some(value) = parse_expression(lexer, errors, allocator) else {
-        errors.push(error_here(
-            ParseErrorKind::InvalidLetStatement,
-            lexer,
-            Expected::Expression,
-            Scope::LetStatement,
-        ));
-        return None;
+        let type_info = parse_type_info(lexer, errors, allocator);
+        if type_info.is_none() {
+            let error = recover_until(
+                ParseErrorKind::InvalidLetStatement,
+                lexer,
+                &[
+                    TokenKind::Equal,
+                    TokenKind::LineFeed,
+                    TokenKind::Semicolon,
+                    TokenKind::BraceRight,
+                ],
+                Expected::TypeInfo,
+                Scope::LetStatement,
+                allocator,
+            );
+            errors.push(error);
+        }
+
+        type_info
+    } else {
+        None
+    };
+
+    let value = if current_kind(lexer) == TokenKind::Equal {
+        lexer.next();
+        skip_line_feed(lexer);
+
+        let value = parse_expression(lexer, errors, allocator);
+        if value.is_none() {
+            errors.push(error_here(
+                ParseErrorKind::InvalidLetStatement,
+                lexer,
+                Expected::Expression,
+                Scope::LetStatement,
+            ));
+        }
+
+        value
+    } else {
+        None
     };
 
     Some(allocator.alloc(LetStatement {
         tunable,
         name,
+        type_info,
         value,
         span: anchor.elapsed(lexer),
     }))
@@ -1136,7 +1160,7 @@ host "desktop" {
 }
 
 inline function calculate(left: Number, right: Number) -> Number {
-    let result = left + right * 2
+    let result: Number = left + right * 2
     let difference = left-right
     let called = math::sum([left, right], - right)
     return called
@@ -1164,7 +1188,8 @@ inline function calculate(left: Number, right: Number) -> Number {
         let Statement::LetStatement(result) = &function.body.statements.statements[0] else {
             panic!("expected let statement");
         };
-        let Expression::Binary(add) = result.value else {
+        assert_eq!(result.type_info.unwrap().name.value, "Number");
+        let Expression::Binary(add) = result.value.unwrap() else {
             panic!("expected addition");
         };
         assert_eq!(add.operator.value, BinaryOperator::Add);
@@ -1176,7 +1201,7 @@ inline function calculate(left: Number, right: Number) -> Number {
         let Statement::LetStatement(difference) = &function.body.statements.statements[1] else {
             panic!("expected difference");
         };
-        let Expression::Binary(subtract) = difference.value else {
+        let Expression::Binary(subtract) = difference.value.unwrap() else {
             panic!("expected subtraction");
         };
         assert_eq!(subtract.operator.value, BinaryOperator::Subtract);
@@ -1184,7 +1209,7 @@ inline function calculate(left: Number, right: Number) -> Number {
         let Statement::LetStatement(called) = &function.body.statements.statements[2] else {
             panic!("expected function call");
         };
-        let Expression::Primary(primary) = called.value else {
+        let Expression::Primary(primary) = called.value.unwrap() else {
             panic!("expected primary expression");
         };
         let call = primary.accesses[0].call.unwrap();
@@ -1273,5 +1298,76 @@ let recovered = true
         };
         assert!(broken.return_type.is_none());
         assert!(matches!(ast.statements[2], Statement::LetStatement(_)));
+    }
+
+    #[test]
+    fn let_type_and_initializer_are_independently_optional() {
+        let source = r#"
+let untyped
+let typed: String
+let initialized = "value"
+let tunable complete: List<String> = []
+"#;
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert!(errors.is_empty(), "parse errors: {errors:#?}");
+        assert_eq!(ast.statements.len(), 4);
+
+        let Statement::LetStatement(untyped) = &ast.statements[0] else {
+            panic!("expected untyped let");
+        };
+        assert!(untyped.type_info.is_none());
+        assert!(untyped.value.is_none());
+
+        let Statement::LetStatement(typed) = &ast.statements[1] else {
+            panic!("expected typed let");
+        };
+        assert_eq!(typed.type_info.unwrap().name.value, "String");
+        assert!(typed.value.is_none());
+
+        let Statement::LetStatement(initialized) = &ast.statements[2] else {
+            panic!("expected initialized let");
+        };
+        assert!(initialized.type_info.is_none());
+        assert!(initialized.value.is_some());
+
+        let Statement::LetStatement(complete) = &ast.statements[3] else {
+            panic!("expected complete let");
+        };
+        assert!(complete.tunable);
+        assert_eq!(complete.type_info.unwrap().name.value, "List");
+        assert_eq!(
+            complete.type_info.unwrap().parameter.unwrap().name.value,
+            "String"
+        );
+        assert!(complete.value.is_some());
+    }
+
+    #[test]
+    fn let_recovers_from_a_missing_type_before_the_initializer() {
+        let source = r#"
+let broken: = true
+let recovered
+"#;
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert_eq!(errors.len(), 1, "parse errors: {errors:#?}");
+        assert_eq!(errors[0].kind, ParseErrorKind::InvalidLetStatement);
+        assert_eq!(ast.statements.len(), 2);
+
+        let Statement::LetStatement(broken) = &ast.statements[0] else {
+            panic!("expected recovered let");
+        };
+        assert!(broken.type_info.is_none());
+        assert!(broken.value.is_some());
+        assert!(matches!(ast.statements[1], Statement::LetStatement(_)));
     }
 }
