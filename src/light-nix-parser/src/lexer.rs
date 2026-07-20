@@ -41,10 +41,6 @@ pub enum TokenKind {
     False,
     /// null
     Null,
-    /// inf
-    Inf,
-    /// nan
-    Nan,
     /// ==
     DoubleEquals,
     /// !=
@@ -93,8 +89,8 @@ pub enum TokenKind {
     BracketRight,
     /// |
     VerticalLine,
-    /// e.g. 6.3, 5E+2
-    FloatNumeric,
+    /// e.g. 42, 6.3, 5E+2
+    NumericLiteral,
     /// e.g. literal
     Literal,
     /// e.g. "literal"
@@ -131,8 +127,6 @@ static TOKENIZERS: &[Tokenizer] = &[
     Tokenizer::Keyword(TokenKind::True, "true"),
     Tokenizer::Keyword(TokenKind::False, "false"),
     Tokenizer::Keyword(TokenKind::Null, "null"),
-    Tokenizer::Keyword(TokenKind::Inf, "inf"),
-    Tokenizer::Keyword(TokenKind::Nan, "nan"),
     // Multi-character operators
     Tokenizer::Keyword(TokenKind::DoubleEquals, "=="),
     Tokenizer::Keyword(TokenKind::NotEquals, "!="),
@@ -173,7 +167,7 @@ static TOKENIZERS: &[Tokenizer] = &[
     // -5e-2
     // 1_000.25
     Tokenizer::Regex(
-        TokenKind::FloatNumeric,
+        TokenKind::NumericLiteral,
         r"[\d_]+(?:\.[\d_]+)?(?:[eE][+-]?[\d_]+)?",
     ),
     // Identifier
@@ -415,7 +409,7 @@ impl Anchor {
 
 #[cfg(test)]
 mod test {
-    use crate::lexer::Lexer;
+    use crate::lexer::{Lexer, TokenKind};
 
     #[test]
     fn lexer() {
@@ -424,9 +418,9 @@ inputs { shojiwm = \"github:bea4dev/ShojiWM\" }
 
 enum Profile { Desktop, Laptop }
 
-tunable let profile: Profile = Profile::Desktop;
+let tunable profile = Profile::Desktop;
 
-use shojiwm;
+use [shojiwm];
 
 programs.shojiwm.enable = true;
 programs.shojiwm.init_config.users = [ \"bea\" ];
@@ -439,5 +433,23 @@ if profile == Profile::Desktop {
         for token in Lexer::new(source) {
             println!("{:?} : {:?}", token.kind, token.text);
         }
+    }
+
+    #[test]
+    fn finite_numbers_are_numeric_but_inf_and_nan_are_literals() {
+        let kinds = Lexer::new("inf nan 1 1.5 5E+2")
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            kinds,
+            [
+                TokenKind::Literal,
+                TokenKind::Literal,
+                TokenKind::NumericLiteral,
+                TokenKind::NumericLiteral,
+                TokenKind::NumericLiteral,
+            ]
+        );
     }
 }

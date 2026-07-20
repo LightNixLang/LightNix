@@ -29,7 +29,7 @@ mod grammar {
         typedef_block      ::= "{" [ lf ] { typedef lf_or_comma } "}"
         typedef            ::= literal ":" ( typedef_block | type_info )
 
-        use_declare        ::= "use" [ "tunable" ] "[" [ lf ] { literal lf_or_comma } "]"
+        use_declare        ::= "use" "[" [ lf ] { literal lf_or_comma } "]"
 
         host_define        ::= "host" string_literal "{" statements "}"
 
@@ -37,10 +37,11 @@ mod grammar {
 
         assign_statement   ::= expression "=" expression
 
-        function_define    ::= function_attribute "function" literal function_arguments block
+        function_define    ::= function_attribute "function" literal function_arguments [ function_return_type ] block
         function_attribute ::= "inline" | "opaque"
         function_arguments ::= "(" [ lf ] { function_argument [ lf_or_comma ] } ")"
         function_argument  ::= literal ":" type_info
+        function_return_type ::= "->" type_info
     
         block              ::= "{" statements "}"
 
@@ -59,7 +60,7 @@ mod grammar {
         mul_or_div_expr    ::= factor { ( "*" | "/" ) factor }
         factor             ::= ( "+" | "-" ) primary | primary
 
-        primary            ::= value { ( "." | "->" | "::" ) [ lf ] literal [ function_call ] }
+        primary            ::= value { ( "." | "::" ) [ lf ] literal [ function_call ] }
         value              ::= array
                                | literal [ function_call ]
                                | numeric_literal
@@ -75,8 +76,7 @@ mod grammar {
 
         literal            ::= r"\w+"
 
-        numeric_literal    ::= float_numeric
-        float_numeric      ::= r"[\d_]+(\.[\d_]+)?([eE][+-]?[\d_]+)?" | "inf" | "nan"
+        numeric_literal    ::= r"[\d_]+(\.[\d_]+)?([eE][+-]?[\d_]+)?"
         
         string_literal     ::= r#""([^"\\]|\\.)*""# | r"'([^'\\]|\\.)*'"
 

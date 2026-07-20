@@ -126,7 +126,6 @@ fn parse_primary<'input, 'allocator>(
     loop {
         let operator = match current_kind(lexer) {
             TokenKind::Dot => AccessOperator::Dot,
-            TokenKind::ThinArrow => AccessOperator::ThinArrow,
             TokenKind::DoubleColon => AccessOperator::DoubleColon,
             _ => break,
         };
@@ -191,7 +190,7 @@ fn parse_value<'input, 'allocator>(
                 span: anchor.elapsed(lexer),
             }))
         }
-        TokenKind::FloatNumeric | TokenKind::Inf | TokenKind::Nan => {
+        TokenKind::NumericLiteral => {
             let token = lexer.next().unwrap();
             Some(Value::Numeric(Spanned::new(token.text, token.span)))
         }

@@ -173,7 +173,6 @@ impl AST for TypedefValue<'_, '_> {
 
 #[derive(Debug)]
 pub struct UseDeclare<'input, 'allocator> {
-    pub tunable: bool,
     pub names: &'allocator [Literal<'input>],
     pub span: Range<usize>,
 }
@@ -213,6 +212,7 @@ pub struct FunctionDefine<'input, 'allocator> {
     pub attribute: Spanned<FunctionAttribute>,
     pub name: Literal<'input>,
     pub arguments: FunctionArguments<'input, 'allocator>,
+    pub return_type: Option<&'allocator TypeInfo<'input, 'allocator>>,
     pub body: &'allocator Block<'input, 'allocator>,
     pub span: Range<usize>,
 }
@@ -385,7 +385,6 @@ impl_ast!(impl<'input, 'allocator> for PrimaryAccess<'input, 'allocator>);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AccessOperator {
     Dot,
-    ThinArrow,
     DoubleColon,
 }
 

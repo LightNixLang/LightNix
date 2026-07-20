@@ -526,12 +526,6 @@ fn parse_use_declare<'input, 'allocator>(
 
     let anchor = lexer.cast_anchor();
     lexer.next();
-    let tunable = if current_kind(lexer) == TokenKind::Tunable {
-        lexer.next();
-        true
-    } else {
-        false
-    };
 
     if !recover_opening_token(
         lexer,
@@ -601,7 +595,6 @@ fn parse_use_declare<'input, 'allocator>(
 
     let names = allocator.alloc_slice_fill_iter(names);
     Some(allocator.alloc(UseDeclare {
-        tunable,
         names,
         span: anchor.elapsed(lexer),
     }))
@@ -769,15 +762,43 @@ fn parse_function_define<'input, 'allocator>(
     };
 
     let arguments = parse_function_arguments(lexer, errors, allocator)?;
+    let return_type = parse_function_return_type(lexer, errors, allocator);
     let body = parse_block(lexer, errors, allocator)?;
 
     Some(allocator.alloc(FunctionDefine {
         attribute,
         name,
         arguments,
+        return_type,
         body,
         span: anchor.elapsed(lexer),
     }))
+}
+
+fn parse_function_return_type<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut ParseErrors<'input, 'allocator>,
+    allocator: &'allocator Bump,
+) -> Option<&'allocator TypeInfo<'input, 'allocator>> {
+    if current_kind(lexer) != TokenKind::ThinArrow {
+        return None;
+    }
+    lexer.next();
+
+    let return_type = parse_type_info(lexer, errors, allocator);
+    if return_type.is_none() {
+        let error = recover_until(
+            ParseErrorKind::InvalidFunctionDefine,
+            lexer,
+            &[TokenKind::BraceLeft, TokenKind::LineFeed],
+            Expected::TypeInfo,
+            Scope::FunctionDefine,
+            allocator,
+        );
+        errors.push(error);
+    }
+
+    return_type
 }
 
 fn parse_function_arguments<'input, 'allocator>(
@@ -1073,6 +1094,7 @@ mod tests {
 
     use crate::{
         ast::{BinaryOperator, Expression, Statement, TypedefValue},
+        error::ParseErrorKind,
         lexer::Lexer,
         parser::parse_source,
     };
@@ -1098,7 +1120,7 @@ type Config {
     }
 }
 
-use tunable [
+use [
     nixpkgs,
     home
 ]
@@ -1113,7 +1135,7 @@ host "desktop" {
     }
 }
 
-inline function calculate(left: Number, right: Number) {
+inline function calculate(left: Number, right: Number) -> Number {
     let result = left + right * 2
     let difference = left-right
     let called = math::sum([left, right], - right)
@@ -1138,6 +1160,7 @@ inline function calculate(left: Number, right: Number) {
         let Statement::FunctionDefine(function) = &ast.statements[5] else {
             panic!("expected function definition");
         };
+        assert_eq!(function.return_type.unwrap().name.value, "Number");
         let Statement::LetStatement(result) = &function.body.statements.statements[0] else {
             panic!("expected let statement");
         };
@@ -1217,5 +1240,38 @@ let recovered = true
         assert_eq!(ast.statements.len(), 2);
         assert!(matches!(ast.statements[0], Statement::UseDeclare(_)));
         assert!(matches!(ast.statements[1], Statement::LetStatement(_)));
+    }
+
+    #[test]
+    fn function_return_type_is_optional_and_recovers_when_missing() {
+        let source = r#"
+opaque function inferred() {
+    return true
+}
+inline function broken() -> {
+    return false
+}
+let recovered = true
+"#;
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert_eq!(errors.len(), 1, "parse errors: {errors:#?}");
+        assert_eq!(errors[0].kind, ParseErrorKind::InvalidFunctionDefine);
+        assert_eq!(ast.statements.len(), 3);
+
+        let Statement::FunctionDefine(inferred) = &ast.statements[0] else {
+            panic!("expected inferred function");
+        };
+        assert!(inferred.return_type.is_none());
+
+        let Statement::FunctionDefine(broken) = &ast.statements[1] else {
+            panic!("expected recovered function");
+        };
+        assert!(broken.return_type.is_none());
+        assert!(matches!(ast.statements[2], Statement::LetStatement(_)));
     }
 }
