@@ -5,8 +5,6 @@ use regex::Regex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TokenKind {
-    /// inputs
-    Inputs,
     /// import
     Import,
     /// enum
@@ -23,8 +21,6 @@ pub enum TokenKind {
     Declare,
     /// cost
     Cost,
-    /// host
-    Host,
     /// let
     Let,
     /// function
@@ -117,7 +113,6 @@ pub enum TokenKind {
 
 static TOKENIZERS: &[Tokenizer] = &[
     // Keywords
-    Tokenizer::Keyword(TokenKind::Inputs, "inputs"),
     Tokenizer::Keyword(TokenKind::Import, "import"),
     Tokenizer::Keyword(TokenKind::Enum, "enum"),
     Tokenizer::Keyword(TokenKind::Type, "type"),
@@ -126,7 +121,6 @@ static TOKENIZERS: &[Tokenizer] = &[
     Tokenizer::Keyword(TokenKind::Readonly, "readonly"),
     Tokenizer::Keyword(TokenKind::Declare, "declare"),
     Tokenizer::Keyword(TokenKind::Cost, "cost"),
-    Tokenizer::Keyword(TokenKind::Host, "host"),
     Tokenizer::Keyword(TokenKind::Let, "let"),
     Tokenizer::Keyword(TokenKind::Function, "function"),
     Tokenizer::Keyword(TokenKind::Inline, "inline"),
@@ -426,7 +420,7 @@ mod test {
     #[test]
     fn lexer() {
         let source = "
-inputs { shojiwm = \"github:bea4dev/ShojiWM\" }
+import \"./common.lnix\"
 
 enum Profile { Desktop, Laptop }
 
@@ -445,6 +439,15 @@ if profile == Profile::Desktop {
         for token in Lexer::new(source) {
             println!("{:?} : {:?}", token.kind, token.text);
         }
+    }
+
+    #[test]
+    fn inputs_and_host_are_regular_literals() {
+        let kinds = Lexer::new("inputs host")
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
+
+        assert_eq!(kinds, [TokenKind::Literal, TokenKind::Literal]);
     }
 
     #[test]

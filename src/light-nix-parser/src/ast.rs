@@ -77,12 +77,10 @@ impl_ast!(impl<'input, 'allocator> for Statements<'input, 'allocator>);
 
 #[derive(Debug)]
 pub enum Statement<'input, 'allocator> {
-    Inputs(&'allocator Inputs<'input, 'allocator>),
     ImportStatement(&'allocator ImportStatement<'input>),
     EnumDefine(&'allocator EnumDefine<'input, 'allocator>),
     TypeDefine(&'allocator TypeDefine<'input, 'allocator>),
     UseDeclare(&'allocator UseDeclare<'input, 'allocator>),
-    HostDefine(&'allocator HostDefine<'input, 'allocator>),
     LetStatement(&'allocator LetStatement<'input, 'allocator>),
     AssignStatement(&'allocator AssignStatement<'input, 'allocator>),
     FunctionDefine(&'allocator FunctionDefine<'input, 'allocator>),
@@ -92,12 +90,10 @@ pub enum Statement<'input, 'allocator> {
 impl AST for Statement<'_, '_> {
     fn span(&self) -> Range<usize> {
         match self {
-            Self::Inputs(node) => node.span(),
             Self::ImportStatement(node) => node.span(),
             Self::EnumDefine(node) => node.span(),
             Self::TypeDefine(node) => node.span(),
             Self::UseDeclare(node) => node.span(),
-            Self::HostDefine(node) => node.span(),
             Self::LetStatement(node) => node.span(),
             Self::AssignStatement(node) => node.span(),
             Self::FunctionDefine(node) => node.span(),
@@ -105,23 +101,6 @@ impl AST for Statement<'_, '_> {
         }
     }
 }
-
-#[derive(Debug)]
-pub struct Inputs<'input, 'allocator> {
-    pub elements: &'allocator [InputsElement<'input>],
-    pub span: Range<usize>,
-}
-
-impl_ast!(impl<'input, 'allocator> for Inputs<'input, 'allocator>);
-
-#[derive(Debug)]
-pub struct InputsElement<'input> {
-    pub key: Literal<'input>,
-    pub value: StringLiteral<'input>,
-    pub span: Range<usize>,
-}
-
-impl_ast!(impl<'input> for InputsElement<'input>);
 
 #[derive(Debug)]
 pub struct ImportStatement<'input> {
@@ -189,15 +168,6 @@ pub struct UseDeclare<'input, 'allocator> {
 }
 
 impl_ast!(impl<'input, 'allocator> for UseDeclare<'input, 'allocator>);
-
-#[derive(Debug)]
-pub struct HostDefine<'input, 'allocator> {
-    pub host: StringLiteral<'input>,
-    pub body: &'allocator Block<'input, 'allocator>,
-    pub span: Range<usize>,
-}
-
-impl_ast!(impl<'input, 'allocator> for HostDefine<'input, 'allocator>);
 
 #[derive(Debug)]
 pub struct LetStatement<'input, 'allocator> {
@@ -482,19 +452,15 @@ mod tests {
 
     #[test]
     fn arena_allocated_tree_keeps_source_slices_and_spans() {
-        let source = "inputs { nixpkgs = \"github:NixOS/nixpkgs\" }";
+        let source = r#"import "./common.lnix""#;
         let arena = AstArena::new();
 
-        let elements = arena.alloc_slice_fill_iter([InputsElement {
-            key: Literal::new(&source[9..16], 9..16),
-            value: StringLiteral::new(&source[19..41], 19..41),
-            span: 9..41,
-        }]);
-        let inputs = arena.alloc(Inputs {
-            elements,
+        let path_start = source.find('"').unwrap();
+        let import = arena.alloc(ImportStatement {
+            path: StringLiteral::new(&source[path_start..], path_start..source.len()),
             span: 0..source.len(),
         });
-        let statements = arena.alloc_slice_fill_iter([Statement::Inputs(inputs)]);
+        let statements = arena.alloc_slice_fill_iter([Statement::ImportStatement(import)]);
         let root = Statements {
             statements,
             span: 0..source.len(),
@@ -502,11 +468,11 @@ mod tests {
 
         assert_eq!(root.span(), 0..source.len());
         assert_eq!(root.statements[0].span(), 0..source.len());
-        let Statement::Inputs(inputs) = &root.statements[0] else {
-            panic!("expected inputs statement");
+        let Statement::ImportStatement(import) = &root.statements[0] else {
+            panic!("expected import statement");
         };
-        assert_eq!(inputs.elements[0].key.value, "nixpkgs");
-        assert_eq!(inputs.elements[0].value.value, "\"github:NixOS/nixpkgs\"");
+        assert_eq!(import.path.value, "\"./common.lnix\"");
+        assert_eq!(&source[import.path.span()], import.path.value);
     }
 
     #[test]

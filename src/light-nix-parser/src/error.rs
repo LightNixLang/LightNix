@@ -18,13 +18,11 @@ pub struct ParseError<'input, 'allocator> {
 pub enum Scope {
     Source,
     Statements,
-    Inputs,
     ImportStatement,
     EnumDefine,
     TypeDefine,
     Typedef,
     UseDeclare,
-    HostDefine,
     LetStatement,
     MutationPolicy,
     AssignStatement,
@@ -44,7 +42,6 @@ pub enum Scope {
 pub enum Expected {
     Statement,
     StatementSeparator,
-    InputsElement,
     EnumVariant,
     Typedef,
     UseElement,
@@ -64,7 +61,6 @@ pub enum Expected {
 pub enum ParseErrorKind {
     InvalidStatement,
     InvalidStatementSeparator,
-    InvalidInputsElement,
     InvalidImportStatement,
     InvalidEnumVariant,
     InvalidTypedef,

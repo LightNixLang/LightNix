@@ -23,12 +23,10 @@ pub(crate) fn current_kind(lexer: &mut Lexer<'_>) -> TokenKind {
 pub(crate) fn is_statement_start(kind: TokenKind) -> bool {
     matches!(
         kind,
-        TokenKind::Inputs
-            | TokenKind::Import
+        TokenKind::Import
             | TokenKind::Enum
             | TokenKind::Type
             | TokenKind::Use
-            | TokenKind::Host
             | TokenKind::Let
             | TokenKind::Declare
             | TokenKind::Inline

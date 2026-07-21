@@ -11,18 +11,13 @@ mod grammar {
         source               ::= statements
 
         statements           ::= [ lf_or_semicolons ] { statement lf_or_semicolons }
-        statement            ::= inputs
-                                 | import_statement
+        statement            ::= import_statement
                                  | enum_define
                                  | type_define
                                  | use_declare
-                                 | host_define
                                  | let_statement
                                  | assign_statement
                                  | function_define
-
-        inputs               ::= "inputs" "{" [ lf_or_semicolons ] { inputs_element lf_or_semicolons } "}"
-        inputs_element       ::= literal "=" string_literal
 
         import_statement     ::= "import" string_literal
 
@@ -33,8 +28,6 @@ mod grammar {
         type_define_element  ::= [ mutation_policy ] literal ":" ( type_define_block | type_info )
 
         use_declare          ::= "use" "[" [ lf ] { literal lf_or_comma } "]"
-
-        host_define          ::= "host" string_literal "{" statements "}"
 
         let_statement        ::= [ "declare" ] "let" [ mutation_policy ] literal [ ":" type_info ] [ "=" [ lf ] expression ]
 

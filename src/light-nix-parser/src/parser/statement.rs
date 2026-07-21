@@ -4,10 +4,9 @@ use bumpalo::Bump;
 use crate::{
     ast::{
         AssignStatement, Block, EnumDefine, Expression, FunctionArgument, FunctionArguments,
-        FunctionAttribute, FunctionDefine, HostDefine, ImportStatement, Inputs, InputsElement,
-        LetStatement, Literal, MutationPolicy, MutationPolicyKind, Source, Spanned, Statement,
-        Statements, StringLiteral, TypeDefine, TypeInfo, Typedef, TypedefBlock, TypedefValue,
-        UseDeclare,
+        FunctionAttribute, FunctionDefine, ImportStatement, LetStatement, Literal, MutationPolicy,
+        MutationPolicyKind, Source, Spanned, Statement, Statements, StringLiteral, TypeDefine,
+        TypeInfo, Typedef, TypedefBlock, TypedefValue, UseDeclare,
     },
     error::{Expected, ParseErrorKind, Scope, error_here, recover_until},
     lexer::{Lexer, TokenKind},
@@ -142,14 +141,12 @@ fn parse_statement<'input, 'allocator>(
     allocator: &'allocator Bump,
 ) -> Option<Statement<'input, 'allocator>> {
     match current_kind(lexer) {
-        TokenKind::Inputs => parse_inputs(lexer, errors, allocator).map(Statement::Inputs),
         TokenKind::Import => {
             parse_import_statement(lexer, errors, allocator).map(Statement::ImportStatement)
         }
         TokenKind::Enum => parse_enum_define(lexer, errors, allocator).map(Statement::EnumDefine),
         TokenKind::Type => parse_type_define(lexer, errors, allocator).map(Statement::TypeDefine),
         TokenKind::Use => parse_use_declare(lexer, errors, allocator).map(Statement::UseDeclare),
-        TokenKind::Host => parse_host_define(lexer, errors, allocator).map(Statement::HostDefine),
         TokenKind::Let | TokenKind::Declare => {
             parse_let_statement(lexer, errors, allocator).map(Statement::LetStatement)
         }
@@ -194,146 +191,6 @@ fn parse_import_statement<'input, 'allocator>(
 
     Some(allocator.alloc(ImportStatement {
         path,
-        span: anchor.elapsed(lexer),
-    }))
-}
-
-fn parse_inputs<'input, 'allocator>(
-    lexer: &mut Lexer<'input>,
-    errors: &mut ParseErrors<'input, 'allocator>,
-    allocator: &'allocator Bump,
-) -> Option<&'allocator Inputs<'input, 'allocator>> {
-    if current_kind(lexer) != TokenKind::Inputs {
-        return None;
-    }
-
-    let anchor = lexer.cast_anchor();
-    lexer.next();
-
-    if !recover_opening_token(
-        lexer,
-        errors,
-        allocator,
-        TokenKind::BraceLeft,
-        Scope::Inputs,
-    ) {
-        return None;
-    }
-
-    skip_statement_separator(lexer);
-    let mut elements = Vec::new_in(allocator);
-
-    loop {
-        if is_statement_start(current_kind(lexer)) {
-            break;
-        }
-        match current_kind(lexer) {
-            TokenKind::BraceRight | TokenKind::None => break,
-            _ => {}
-        }
-
-        let element_anchor = lexer.cast_anchor();
-        let key = if current_kind(lexer) == TokenKind::Literal {
-            parse_literal(lexer).unwrap()
-        } else {
-            let error = recover_until(
-                ParseErrorKind::InvalidInputsElement,
-                lexer,
-                &[
-                    TokenKind::LineFeed,
-                    TokenKind::Semicolon,
-                    TokenKind::BraceRight,
-                ],
-                Expected::InputsElement,
-                Scope::Inputs,
-                allocator,
-            );
-            errors.push(error);
-            if current_kind(lexer) == TokenKind::BraceRight {
-                break;
-            }
-            skip_statement_separator(lexer);
-            continue;
-        };
-
-        if current_kind(lexer) != TokenKind::Equal {
-            let error = recover_until(
-                ParseErrorKind::InvalidInputsElement,
-                lexer,
-                &[
-                    TokenKind::LineFeed,
-                    TokenKind::Semicolon,
-                    TokenKind::BraceRight,
-                ],
-                Expected::Token(TokenKind::Equal),
-                Scope::Inputs,
-                allocator,
-            );
-            errors.push(error);
-            skip_statement_separator(lexer);
-            continue;
-        }
-        lexer.next();
-
-        if current_kind(lexer) != TokenKind::StringLiteral {
-            let error = recover_until(
-                ParseErrorKind::InvalidInputsElement,
-                lexer,
-                &[
-                    TokenKind::LineFeed,
-                    TokenKind::Semicolon,
-                    TokenKind::BraceRight,
-                ],
-                Expected::StringLiteral,
-                Scope::Inputs,
-                allocator,
-            );
-            errors.push(error);
-            skip_statement_separator(lexer);
-            continue;
-        }
-        let value_token = lexer.next().unwrap();
-        let value = StringLiteral::new(value_token.text, value_token.span);
-
-        elements.push(InputsElement {
-            key,
-            value,
-            span: element_anchor.elapsed(lexer),
-        });
-
-        if current_kind(lexer) == TokenKind::BraceRight {
-            break;
-        }
-        if !skip_statement_separator(lexer) {
-            let error = recover_until(
-                ParseErrorKind::InvalidInputsElement,
-                lexer,
-                &[
-                    TokenKind::LineFeed,
-                    TokenKind::Semicolon,
-                    TokenKind::BraceRight,
-                ],
-                Expected::StatementSeparator,
-                Scope::Inputs,
-                allocator,
-            );
-            errors.push(error);
-            skip_statement_separator(lexer);
-        }
-    }
-
-    close_delimiter(
-        lexer,
-        errors,
-        allocator,
-        TokenKind::BraceRight,
-        ParseErrorKind::NonClosedBrace,
-        Scope::Inputs,
-    );
-
-    let elements = allocator.alloc_slice_fill_iter(elements);
-    Some(allocator.alloc(Inputs {
-        elements,
         span: anchor.elapsed(lexer),
     }))
 }
@@ -661,38 +518,6 @@ fn parse_use_declare<'input, 'allocator>(
     let names = allocator.alloc_slice_fill_iter(names);
     Some(allocator.alloc(UseDeclare {
         names,
-        span: anchor.elapsed(lexer),
-    }))
-}
-
-fn parse_host_define<'input, 'allocator>(
-    lexer: &mut Lexer<'input>,
-    errors: &mut ParseErrors<'input, 'allocator>,
-    allocator: &'allocator Bump,
-) -> Option<&'allocator HostDefine<'input, 'allocator>> {
-    if current_kind(lexer) != TokenKind::Host {
-        return None;
-    }
-
-    let anchor = lexer.cast_anchor();
-    lexer.next();
-
-    if current_kind(lexer) != TokenKind::StringLiteral {
-        errors.push(error_here(
-            ParseErrorKind::UnexpectedToken,
-            lexer,
-            Expected::StringLiteral,
-            Scope::HostDefine,
-        ));
-        return None;
-    }
-    let host_token = lexer.next().unwrap();
-    let host = StringLiteral::new(host_token.text, host_token.span);
-    let body = parse_block(lexer, errors, allocator)?;
-
-    Some(allocator.alloc(HostDefine {
-        host,
-        body,
         span: anchor.elapsed(lexer),
     }))
 }
@@ -1346,10 +1171,7 @@ mod tests {
     #[test]
     fn parses_the_complete_grammar() {
         let source = r#"
-inputs {
-    nixpkgs = "github:NixOS/nixpkgs"
-    home = "github:nix-community/home-manager";
-}
+import "./common.lnix"
 
 enum Profile {
     Desktop,
@@ -1369,14 +1191,12 @@ use [
     home
 ]
 
-host "desktop" {
-    let tunable profile = Profile::Desktop
-    programs.shojiwm.enable = true
-    if profile == Profile::Desktop {
-        programs.firefox.enable = true
-    } else {
-        programs.firefox.enable = false
-    }
+let tunable profile = Profile::Desktop
+programs.shojiwm.enable = true
+if profile == Profile::Desktop {
+    programs.firefox.enable = true
+} else {
+    programs.firefox.enable = false
 }
 
 inline function calculate(left: Number, right: Number) -> Number {
@@ -1393,7 +1213,7 @@ inline function calculate(left: Number, right: Number) -> Number {
         let ast = parse_source(&mut lexer, &mut errors, &allocator);
 
         assert!(errors.is_empty(), "parse errors: {errors:#?}");
-        assert_eq!(ast.statements.len(), 6);
+        assert_eq!(ast.statements.len(), 8);
 
         let Statement::TypeDefine(ty) = &ast.statements[2] else {
             panic!("expected type definition");
@@ -1401,7 +1221,7 @@ inline function calculate(left: Number, right: Number) -> Number {
         assert_eq!(ty.body.fields.len(), 3);
         assert!(matches!(ty.body.fields[2].value, TypedefValue::Block(_)));
 
-        let Statement::FunctionDefine(function) = &ast.statements[5] else {
+        let Statement::FunctionDefine(function) = &ast.statements[7] else {
             panic!("expected function definition");
         };
         assert_eq!(function.return_type.unwrap().name.value, "Number");
@@ -1445,10 +1265,6 @@ inline function calculate(left: Number, right: Number) -> Number {
     #[test]
     fn recovers_inside_a_statement_and_parses_following_statements() {
         let source = r#"
-inputs {
-    broken = 123;
-    good = "value"
-}
 enum Profile { Desktop, =, Laptop }
 let recovered = true
 "#;
@@ -1458,15 +1274,37 @@ let recovered = true
 
         let ast = parse_source(&mut lexer, &mut errors, &allocator);
 
-        assert!(errors.len() >= 2, "expected recoverable errors");
-        assert_eq!(ast.statements.len(), 3);
+        assert!(!errors.is_empty(), "expected a recoverable error");
+        assert_eq!(ast.statements.len(), 2);
 
-        let Statement::Inputs(inputs) = &ast.statements[0] else {
-            panic!("expected inputs");
+        let Statement::EnumDefine(profile) = &ast.statements[0] else {
+            panic!("expected enum");
         };
-        assert_eq!(inputs.elements.len(), 1);
-        assert_eq!(inputs.elements[0].key.value, "good");
-        assert!(matches!(ast.statements[2], Statement::LetStatement(_)));
+        assert_eq!(profile.variants.len(), 2);
+        assert_eq!(profile.variants[0].value, "Desktop");
+        assert_eq!(profile.variants[1].value, "Laptop");
+        assert!(matches!(ast.statements[1], Statement::LetStatement(_)));
+    }
+
+    #[test]
+    fn inputs_and_host_can_be_used_as_identifiers() {
+        let source = r#"
+inputs = true
+host = false
+"#;
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert!(errors.is_empty(), "parse errors: {errors:#?}");
+        assert_eq!(ast.statements.len(), 2);
+        assert!(
+            ast.statements
+                .iter()
+                .all(|statement| matches!(statement, Statement::AssignStatement(_)))
+        );
     }
 
     #[test]
