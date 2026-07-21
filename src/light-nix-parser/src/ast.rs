@@ -77,7 +77,7 @@ impl_ast!(impl<'input, 'allocator> for Statements<'input, 'allocator>);
 
 #[derive(Debug)]
 pub enum Statement<'input, 'allocator> {
-    ImportStatement(&'allocator ImportStatement<'input>),
+    ImportStatement(&'allocator ImportStatement<'input, 'allocator>),
     EnumDefine(&'allocator EnumDefine<'input, 'allocator>),
     TypeDefine(&'allocator TypeDefine<'input, 'allocator>),
     UseDeclare(&'allocator UseDeclare<'input, 'allocator>),
@@ -103,15 +103,33 @@ impl AST for Statement<'_, '_> {
 }
 
 #[derive(Debug)]
-pub struct ImportStatement<'input> {
+pub struct ImportStatement<'input, 'allocator> {
+    pub kind: ImportKind<'input, 'allocator>,
     pub path: StringLiteral<'input>,
     pub span: Range<usize>,
 }
 
-impl_ast!(impl<'input> for ImportStatement<'input>);
+impl_ast!(impl<'input, 'allocator> for ImportStatement<'input, 'allocator>);
+
+#[derive(Debug)]
+pub enum ImportKind<'input, 'allocator> {
+    SideEffect,
+    Named(&'allocator [ImportElement<'input>]),
+    Namespace { alias: Literal<'input> },
+}
+
+#[derive(Debug)]
+pub struct ImportElement<'input> {
+    pub name: Literal<'input>,
+    pub alias: Option<Literal<'input>>,
+    pub span: Range<usize>,
+}
+
+impl_ast!(impl<'input> for ImportElement<'input>);
 
 #[derive(Debug)]
 pub struct EnumDefine<'input, 'allocator> {
+    pub exported: bool,
     pub name: Literal<'input>,
     pub representation_type: Option<&'allocator TypeInfo<'input, 'allocator>>,
     pub variants: &'allocator [EnumVariant<'input, 'allocator>],
@@ -131,6 +149,7 @@ impl_ast!(impl<'input, 'allocator> for EnumVariant<'input, 'allocator>);
 
 #[derive(Debug)]
 pub struct TypeDefine<'input, 'allocator> {
+    pub exported: bool,
     pub name: Literal<'input>,
     pub body: &'allocator TypedefBlock<'input, 'allocator>,
     pub span: Range<usize>,
@@ -181,6 +200,7 @@ impl_ast!(impl<'input, 'allocator> for UseDeclare<'input, 'allocator>);
 
 #[derive(Debug)]
 pub struct LetStatement<'input, 'allocator> {
+    pub exported: bool,
     pub declare: bool,
     pub policy: Option<MutationPolicy>,
     pub name: Literal<'input>,
@@ -220,6 +240,7 @@ impl_ast!(impl<'input, 'allocator> for AssignStatement<'input, 'allocator>);
 
 #[derive(Debug)]
 pub struct FunctionDefine<'input, 'allocator> {
+    pub exported: bool,
     pub attribute: Spanned<FunctionAttribute>,
     pub name: Literal<'input>,
     pub arguments: FunctionArguments<'input, 'allocator>,
@@ -548,6 +569,7 @@ mod tests {
 
         let path_start = source.find('"').unwrap();
         let import = arena.alloc(ImportStatement {
+            kind: ImportKind::SideEffect,
             path: StringLiteral::new(&source[path_start..], path_start..source.len()),
             span: 0..source.len(),
         });

@@ -7,6 +7,12 @@ use regex::Regex;
 pub enum TokenKind {
     /// import
     Import,
+    /// export
+    Export,
+    /// from
+    From,
+    /// as
+    As,
     /// enum
     Enum,
     /// type
@@ -126,6 +132,9 @@ pub enum TokenKind {
 static TOKENIZERS: &[Tokenizer] = &[
     // Keywords
     Tokenizer::Keyword(TokenKind::Import, "import"),
+    Tokenizer::Keyword(TokenKind::Export, "export"),
+    Tokenizer::Keyword(TokenKind::From, "from"),
+    Tokenizer::Keyword(TokenKind::As, "as"),
     Tokenizer::Keyword(TokenKind::Enum, "enum"),
     Tokenizer::Keyword(TokenKind::Type, "type"),
     Tokenizer::Keyword(TokenKind::Use, "use"),
@@ -493,6 +502,33 @@ if profile == Profile::Desktop {
                 TokenKind::BraceRight,
                 TokenKind::Literal,
                 TokenKind::Question,
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenizes_explicit_import_and_export_syntax() {
+        let kinds = Lexer::new(
+            r#"import { Programs as Config } from "./module.lnix" export declare let value"#,
+        )
+        .map(|token| token.kind)
+        .collect::<Vec<_>>();
+
+        assert_eq!(
+            kinds,
+            [
+                TokenKind::Import,
+                TokenKind::BraceLeft,
+                TokenKind::Literal,
+                TokenKind::As,
+                TokenKind::Literal,
+                TokenKind::BraceRight,
+                TokenKind::From,
+                TokenKind::StringLiteral,
+                TokenKind::Export,
+                TokenKind::Declare,
+                TokenKind::Let,
+                TokenKind::Literal,
             ]
         );
     }

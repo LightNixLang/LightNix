@@ -24,6 +24,7 @@ pub(crate) fn is_statement_start(kind: TokenKind) -> bool {
     matches!(
         kind,
         TokenKind::Import
+            | TokenKind::Export
             | TokenKind::Enum
             | TokenKind::Type
             | TokenKind::Use

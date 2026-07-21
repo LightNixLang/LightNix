@@ -4,9 +4,10 @@ use bumpalo::Bump;
 use crate::{
     ast::{
         AssignStatement, Block, EnumDefine, EnumVariant, Expression, FunctionArgument,
-        FunctionArguments, FunctionAttribute, FunctionDefine, ImportStatement, LetStatement,
-        Literal, MutationPolicy, MutationPolicyKind, Source, Spanned, Statement, Statements,
-        StringLiteral, TypeDefine, TypeInfo, Typedef, TypedefBlock, TypedefValue, UseDeclare,
+        FunctionArguments, FunctionAttribute, FunctionDefine, ImportElement, ImportKind,
+        ImportStatement, LetStatement, Literal, MutationPolicy, MutationPolicyKind, Source,
+        Spanned, Statement, Statements, StringLiteral, TypeDefine, TypeInfo, Typedef, TypedefBlock,
+        TypedefValue, UseDeclare,
     },
     error::{Expected, ParseErrorKind, Scope, error_here, recover_until},
     lexer::{Lexer, TokenKind},
@@ -144,6 +145,7 @@ fn parse_statement<'input, 'allocator>(
         TokenKind::Import => {
             parse_import_statement(lexer, errors, allocator).map(Statement::ImportStatement)
         }
+        TokenKind::Export => parse_exported_statement(lexer, errors, allocator),
         TokenKind::Enum => parse_enum_define(lexer, errors, allocator).map(Statement::EnumDefine),
         TokenKind::Type => parse_type_define(lexer, errors, allocator).map(Statement::TypeDefine),
         TokenKind::Use => parse_use_declare(lexer, errors, allocator).map(Statement::UseDeclare),
@@ -157,11 +159,50 @@ fn parse_statement<'input, 'allocator>(
     }
 }
 
+fn parse_exported_statement<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut ParseErrors<'input, 'allocator>,
+    allocator: &'allocator Bump,
+) -> Option<Statement<'input, 'allocator>> {
+    let anchor = lexer.cast_anchor();
+    lexer.next();
+    let declaration_kind = current_kind(lexer);
+    lexer.back_to_anchor(anchor);
+
+    match declaration_kind {
+        TokenKind::Enum => parse_enum_define(lexer, errors, allocator).map(Statement::EnumDefine),
+        TokenKind::Type => parse_type_define(lexer, errors, allocator).map(Statement::TypeDefine),
+        TokenKind::Declare | TokenKind::Let => {
+            parse_let_statement(lexer, errors, allocator).map(Statement::LetStatement)
+        }
+        TokenKind::Inline | TokenKind::Opaque => {
+            parse_function_define(lexer, errors, allocator).map(Statement::FunctionDefine)
+        }
+        _ => {
+            lexer.next();
+            let error = recover_until(
+                ParseErrorKind::InvalidExportStatement,
+                lexer,
+                &[
+                    TokenKind::LineFeed,
+                    TokenKind::Semicolon,
+                    TokenKind::BraceRight,
+                ],
+                Expected::ExportableDeclaration,
+                Scope::ExportStatement,
+                allocator,
+            );
+            errors.push(error);
+            None
+        }
+    }
+}
+
 fn parse_import_statement<'input, 'allocator>(
     lexer: &mut Lexer<'input>,
     errors: &mut ParseErrors<'input, 'allocator>,
     allocator: &'allocator Bump,
-) -> Option<&'allocator ImportStatement<'input>> {
+) -> Option<&'allocator ImportStatement<'input, 'allocator>> {
     if current_kind(lexer) != TokenKind::Import {
         return None;
     }
@@ -169,30 +210,193 @@ fn parse_import_statement<'input, 'allocator>(
     let anchor = lexer.cast_anchor();
     lexer.next();
 
-    if current_kind(lexer) != TokenKind::StringLiteral {
-        let error = recover_until(
-            ParseErrorKind::InvalidImportStatement,
-            lexer,
-            &[
-                TokenKind::LineFeed,
-                TokenKind::Semicolon,
-                TokenKind::BraceRight,
-            ],
-            Expected::StringLiteral,
-            Scope::ImportStatement,
-            allocator,
-        );
-        errors.push(error);
-        return None;
+    let kind = match current_kind(lexer) {
+        TokenKind::StringLiteral => ImportKind::SideEffect,
+        TokenKind::BraceLeft => ImportKind::Named(parse_import_elements(lexer, errors, allocator)),
+        TokenKind::Asterisk => {
+            lexer.next();
+
+            if current_kind(lexer) != TokenKind::As {
+                errors.push(error_here(
+                    ParseErrorKind::InvalidImportStatement,
+                    lexer,
+                    Expected::Token(TokenKind::As),
+                    Scope::ImportStatement,
+                ));
+                return None;
+            }
+            lexer.next();
+
+            let Some(alias) = parse_literal(lexer) else {
+                errors.push(error_here(
+                    ParseErrorKind::InvalidImportStatement,
+                    lexer,
+                    Expected::Literal,
+                    Scope::ImportStatement,
+                ));
+                return None;
+            };
+
+            ImportKind::Namespace { alias }
+        }
+        _ => {
+            let error = recover_until(
+                ParseErrorKind::InvalidImportStatement,
+                lexer,
+                &[
+                    TokenKind::LineFeed,
+                    TokenKind::Semicolon,
+                    TokenKind::BraceRight,
+                ],
+                Expected::StringLiteral,
+                Scope::ImportStatement,
+                allocator,
+            );
+            errors.push(error);
+            return None;
+        }
+    };
+
+    if matches!(&kind, ImportKind::SideEffect) {
+        let path_token = lexer.next().unwrap();
+        let path = StringLiteral::new(path_token.text, path_token.span);
+        return Some(allocator.alloc(ImportStatement {
+            kind,
+            path,
+            span: anchor.elapsed(lexer),
+        }));
     }
 
+    if current_kind(lexer) != TokenKind::From {
+        errors.push(error_here(
+            ParseErrorKind::InvalidImportStatement,
+            lexer,
+            Expected::Token(TokenKind::From),
+            Scope::ImportStatement,
+        ));
+        if current_kind(lexer) != TokenKind::StringLiteral {
+            return None;
+        }
+    } else {
+        lexer.next();
+    }
+
+    if current_kind(lexer) != TokenKind::StringLiteral {
+        errors.push(error_here(
+            ParseErrorKind::InvalidImportStatement,
+            lexer,
+            Expected::StringLiteral,
+            Scope::ImportStatement,
+        ));
+        return None;
+    }
     let path_token = lexer.next().unwrap();
     let path = StringLiteral::new(path_token.text, path_token.span);
 
     Some(allocator.alloc(ImportStatement {
+        kind,
         path,
         span: anchor.elapsed(lexer),
     }))
+}
+
+fn parse_import_elements<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut ParseErrors<'input, 'allocator>,
+    allocator: &'allocator Bump,
+) -> &'allocator [ImportElement<'input>] {
+    lexer.next();
+    skip_line_feed(lexer);
+    let mut elements = Vec::new_in(allocator);
+
+    loop {
+        if matches!(
+            current_kind(lexer),
+            TokenKind::BraceRight | TokenKind::From | TokenKind::None
+        ) || is_statement_start(current_kind(lexer))
+        {
+            break;
+        }
+
+        let element_anchor = lexer.cast_anchor();
+        let Some(name) = parse_literal(lexer) else {
+            let error = recover_until(
+                ParseErrorKind::InvalidImportElement,
+                lexer,
+                &[
+                    TokenKind::LineFeed,
+                    TokenKind::Comma,
+                    TokenKind::BraceRight,
+                    TokenKind::From,
+                ],
+                Expected::ImportElement,
+                Scope::ImportElement,
+                allocator,
+            );
+            errors.push(error);
+            if matches!(current_kind(lexer), TokenKind::BraceRight | TokenKind::From) {
+                break;
+            }
+            skip_list_separator(lexer);
+            continue;
+        };
+
+        let alias = if current_kind(lexer) == TokenKind::As {
+            lexer.next();
+            let alias = parse_literal(lexer);
+            if alias.is_none() {
+                errors.push(error_here(
+                    ParseErrorKind::InvalidImportElement,
+                    lexer,
+                    Expected::Literal,
+                    Scope::ImportElement,
+                ));
+            }
+            alias
+        } else {
+            None
+        };
+
+        elements.push(ImportElement {
+            name,
+            alias,
+            span: element_anchor.elapsed(lexer),
+        });
+
+        if matches!(current_kind(lexer), TokenKind::BraceRight | TokenKind::From) {
+            break;
+        }
+        if !skip_list_separator(lexer) {
+            let error = recover_until(
+                ParseErrorKind::InvalidImportElement,
+                lexer,
+                &[
+                    TokenKind::LineFeed,
+                    TokenKind::Comma,
+                    TokenKind::BraceRight,
+                    TokenKind::From,
+                ],
+                Expected::Token(TokenKind::Comma),
+                Scope::ImportElement,
+                allocator,
+            );
+            errors.push(error);
+            skip_list_separator(lexer);
+        }
+    }
+
+    if current_kind(lexer) != TokenKind::BraceRight {
+        errors.push(error_here(
+            ParseErrorKind::NonClosedBrace,
+            lexer,
+            Expected::Token(TokenKind::BraceRight),
+            Scope::ImportStatement,
+        ));
+    } else {
+        lexer.next();
+    }
+
+    allocator.alloc_slice_fill_iter(elements)
 }
 
 fn parse_enum_define<'input, 'allocator>(
@@ -200,11 +404,15 @@ fn parse_enum_define<'input, 'allocator>(
     errors: &mut ParseErrors<'input, 'allocator>,
     allocator: &'allocator Bump,
 ) -> Option<&'allocator EnumDefine<'input, 'allocator>> {
-    if current_kind(lexer) != TokenKind::Enum {
+    if !matches!(current_kind(lexer), TokenKind::Export | TokenKind::Enum) {
         return None;
     }
 
     let anchor = lexer.cast_anchor();
+    let exported = parse_export_modifier(lexer);
+    if current_kind(lexer) != TokenKind::Enum {
+        return None;
+    }
     lexer.next();
 
     let Some(name) = parse_literal(lexer) else {
@@ -343,6 +551,7 @@ fn parse_enum_define<'input, 'allocator>(
 
     let variants = allocator.alloc_slice_fill_iter(variants);
     Some(allocator.alloc(EnumDefine {
+        exported,
         name,
         representation_type,
         variants,
@@ -355,11 +564,15 @@ fn parse_type_define<'input, 'allocator>(
     errors: &mut ParseErrors<'input, 'allocator>,
     allocator: &'allocator Bump,
 ) -> Option<&'allocator TypeDefine<'input, 'allocator>> {
-    if current_kind(lexer) != TokenKind::Type {
+    if !matches!(current_kind(lexer), TokenKind::Export | TokenKind::Type) {
         return None;
     }
 
     let anchor = lexer.cast_anchor();
+    let exported = parse_export_modifier(lexer);
+    if current_kind(lexer) != TokenKind::Type {
+        return None;
+    }
     lexer.next();
 
     let Some(name) = parse_literal(lexer) else {
@@ -374,6 +587,7 @@ fn parse_type_define<'input, 'allocator>(
 
     let body = parse_typedef_block(lexer, errors, allocator)?;
     Some(allocator.alloc(TypeDefine {
+        exported,
         name,
         body,
         span: anchor.elapsed(lexer),
@@ -593,11 +807,15 @@ fn parse_let_statement<'input, 'allocator>(
     errors: &mut ParseErrors<'input, 'allocator>,
     allocator: &'allocator Bump,
 ) -> Option<&'allocator LetStatement<'input, 'allocator>> {
-    if !matches!(current_kind(lexer), TokenKind::Declare | TokenKind::Let) {
+    if !matches!(
+        current_kind(lexer),
+        TokenKind::Export | TokenKind::Declare | TokenKind::Let
+    ) {
         return None;
     }
 
     let anchor = lexer.cast_anchor();
+    let exported = parse_export_modifier(lexer);
     let declare = if current_kind(lexer) == TokenKind::Declare {
         lexer.next();
         true
@@ -674,6 +892,7 @@ fn parse_let_statement<'input, 'allocator>(
     };
 
     Some(allocator.alloc(LetStatement {
+        exported,
         declare,
         policy,
         name,
@@ -726,7 +945,15 @@ fn parse_function_define<'input, 'allocator>(
     errors: &mut ParseErrors<'input, 'allocator>,
     allocator: &'allocator Bump,
 ) -> Option<&'allocator FunctionDefine<'input, 'allocator>> {
+    if !matches!(
+        current_kind(lexer),
+        TokenKind::Export | TokenKind::Inline | TokenKind::Opaque
+    ) {
+        return None;
+    }
+
     let anchor = lexer.cast_anchor();
+    let exported = parse_export_modifier(lexer);
 
     let attribute = match current_kind(lexer) {
         TokenKind::Inline => FunctionAttribute::Inline,
@@ -762,6 +989,7 @@ fn parse_function_define<'input, 'allocator>(
     let body = parse_block(lexer, errors, allocator)?;
 
     Some(allocator.alloc(FunctionDefine {
+        exported,
         attribute,
         name,
         arguments,
@@ -1179,6 +1407,15 @@ fn parse_policy_cost(text: &str) -> Option<u64> {
     found_digit.then_some(value)
 }
 
+fn parse_export_modifier(lexer: &mut Lexer<'_>) -> bool {
+    if current_kind(lexer) != TokenKind::Export {
+        return false;
+    }
+
+    lexer.next();
+    true
+}
+
 fn parse_literal<'input>(lexer: &mut Lexer<'input>) -> Option<Literal<'input>> {
     if current_kind(lexer) != TokenKind::Literal {
         return None;
@@ -1259,8 +1496,8 @@ mod tests {
 
     use crate::{
         ast::{
-            AccessOperator, BinaryOperator, Expression, MutationPolicyKind, Pattern, Statement,
-            TypedefValue, Value,
+            AccessOperator, BinaryOperator, Expression, ImportKind, MutationPolicyKind, Pattern,
+            Statement, TypedefValue, Value,
         },
         error::ParseErrorKind,
         lexer::Lexer,
@@ -1783,14 +2020,158 @@ let recovered = true
         let Statement::ImportStatement(first) = &ast.statements[0] else {
             panic!("expected first import statement");
         };
+        assert!(matches!(first.kind, ImportKind::SideEffect));
         assert_eq!(first.path.value, r#""./modules/programs.lnix""#);
         assert_eq!(&source[first.path.span()], first.path.value);
 
         let Statement::ImportStatement(second) = &ast.statements[1] else {
             panic!("expected second import statement");
         };
+        assert!(matches!(second.kind, ImportKind::SideEffect));
         assert_eq!(second.path.value, "'catalog/firefox.lnix'");
         assert_eq!(&source[second.path.span()], second.path.value);
+        assert!(matches!(ast.statements[2], Statement::LetStatement(_)));
+    }
+
+    #[test]
+    fn parses_typescript_style_imports_and_exported_declarations() {
+        let source = r#"
+import "./common.lnix"
+import { Programs, helper as desktop_helper } from "./programs.lnix"
+import * as desktop from "./desktop.lnix"
+export enum Profile { Desktop, Laptop }
+export type Programs { enabled: Bool }
+export declare let programs: Programs
+export let public_value = true
+export inline function identity(value: String) -> String {
+    return value
+}
+let local_value = false
+"#;
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert!(errors.is_empty(), "parse errors: {errors:#?}");
+        assert_eq!(ast.statements.len(), 9);
+
+        let Statement::ImportStatement(side_effect) = &ast.statements[0] else {
+            panic!("expected side-effect import");
+        };
+        assert!(matches!(side_effect.kind, ImportKind::SideEffect));
+
+        let Statement::ImportStatement(named) = &ast.statements[1] else {
+            panic!("expected named import");
+        };
+        let ImportKind::Named(elements) = named.kind else {
+            panic!("expected named import elements");
+        };
+        assert_eq!(elements.len(), 2);
+        assert_eq!(elements[0].name.value, "Programs");
+        assert!(elements[0].alias.is_none());
+        assert_eq!(elements[1].name.value, "helper");
+        assert_eq!(elements[1].alias.as_ref().unwrap().value, "desktop_helper");
+        assert_eq!(named.path.value, r#""./programs.lnix""#);
+
+        let Statement::ImportStatement(namespace) = &ast.statements[2] else {
+            panic!("expected namespace import");
+        };
+        let ImportKind::Namespace { alias } = &namespace.kind else {
+            panic!("expected namespace alias");
+        };
+        assert_eq!(alias.value, "desktop");
+        assert_eq!(namespace.path.value, r#""./desktop.lnix""#);
+
+        let Statement::EnumDefine(profile) = &ast.statements[3] else {
+            panic!("expected exported enum");
+        };
+        assert!(profile.exported);
+
+        let Statement::TypeDefine(programs_type) = &ast.statements[4] else {
+            panic!("expected exported type");
+        };
+        assert!(programs_type.exported);
+
+        let Statement::LetStatement(programs) = &ast.statements[5] else {
+            panic!("expected exported declaration");
+        };
+        assert!(programs.exported);
+        assert!(programs.declare);
+
+        let Statement::LetStatement(public_value) = &ast.statements[6] else {
+            panic!("expected exported binding");
+        };
+        assert!(public_value.exported);
+        assert!(!public_value.declare);
+
+        let Statement::FunctionDefine(identity) = &ast.statements[7] else {
+            panic!("expected exported function");
+        };
+        assert!(identity.exported);
+
+        let Statement::LetStatement(local_value) = &ast.statements[8] else {
+            panic!("expected local binding");
+        };
+        assert!(!local_value.exported);
+    }
+
+    #[test]
+    fn malformed_imports_and_exports_recover_to_following_declarations() {
+        let source = r#"
+import {
+    Good as,
+    Other
+} from "./module.lnix"
+import { MissingBrace
+from "./second.lnix"
+export use [invalid]
+let recovered = true
+"#;
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert_eq!(errors.len(), 3, "parse errors: {errors:#?}");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.kind == ParseErrorKind::InvalidImportElement)
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.kind == ParseErrorKind::NonClosedBrace)
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.kind == ParseErrorKind::InvalidExportStatement)
+        );
+        assert_eq!(ast.statements.len(), 3);
+
+        let Statement::ImportStatement(first) = &ast.statements[0] else {
+            panic!("expected recovered named import");
+        };
+        let ImportKind::Named(elements) = first.kind else {
+            panic!("expected named imports");
+        };
+        assert_eq!(elements.len(), 2);
+        assert_eq!(elements[0].name.value, "Good");
+        assert!(elements[0].alias.is_none());
+        assert_eq!(elements[1].name.value, "Other");
+
+        let Statement::ImportStatement(second) = &ast.statements[1] else {
+            panic!("expected import recovered from a missing brace");
+        };
+        let ImportKind::Named(elements) = second.kind else {
+            panic!("expected named imports");
+        };
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0].name.value, "MissingBrace");
         assert!(matches!(ast.statements[2], Statement::LetStatement(_)));
     }
 

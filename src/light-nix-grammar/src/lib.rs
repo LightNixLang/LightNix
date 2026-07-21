@@ -19,27 +19,31 @@ mod grammar {
                                  | assign_statement
                                  | function_define
 
-        import_statement     ::= "import" string_literal
+        import_statement     ::= "import" ( string_literal
+                                            | import_names "from" string_literal
+                                            | "*" "as" literal "from" string_literal )
+        import_names         ::= "{" [ lf ] { import_name lf_or_comma } "}"
+        import_name          ::= literal [ "as" literal ]
 
-        enum_define          ::= "enum" literal ( enum_symbolic_body | ":" type_info enum_repr_body )
+        enum_define          ::= [ "export" ] "enum" literal ( enum_symbolic_body | ":" type_info enum_repr_body )
         enum_symbolic_body   ::= "{" [ lf ] { literal lf_or_comma } "}"
         enum_repr_body       ::= "{" [ lf ] { enum_repr_variant lf_or_comma } "}"
         enum_repr_variant    ::= literal "=" expression
 
-        type_define          ::= "type" literal type_define_block
+        type_define          ::= [ "export" ] "type" literal type_define_block
         type_define_block    ::= "{" [ lf ] { type_define_element lf_or_comma } "}"
         type_define_element  ::= [ mutation_policy ] literal ":" ( type_define_block | type_info )
 
         use_declare          ::= "use" "[" [ lf ] { literal lf_or_comma } "]"
 
-        let_statement        ::= [ "declare" ] "let" [ mutation_policy ] literal [ ":" type_info ] [ "=" [ lf ] expression ]
+        let_statement        ::= [ "export" ] [ "declare" ] "let" [ mutation_policy ] literal [ ":" type_info ] [ "=" [ lf ] expression ]
 
         mutation_policy      ::= "readonly"
                                  | "tunable" [ "(" "cost" "=" integer_literal ")" ]
 
         assign_statement     ::= expression "=" expression
 
-        function_define      ::= function_attribute "function" literal function_arguments [ function_return_type ] block
+        function_define      ::= [ "export" ] function_attribute "function" literal function_arguments [ function_return_type ] block
         function_attribute   ::= "inline" | "opaque"
         function_arguments   ::= "(" [ lf ] { function_argument [ lf_or_comma ] } ")"
         function_argument    ::= literal ":" type_info
