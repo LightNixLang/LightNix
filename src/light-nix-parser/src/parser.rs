@@ -32,6 +32,7 @@ pub(crate) fn is_statement_start(kind: TokenKind) -> bool {
             | TokenKind::Inline
             | TokenKind::Opaque
             | TokenKind::If
+            | TokenKind::Match
             | TokenKind::Return
     )
 }

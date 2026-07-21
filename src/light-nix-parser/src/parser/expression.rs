@@ -4,9 +4,10 @@ use bumpalo::Bump;
 use crate::{
     ast::{
         AST, AccessOperator, Array, BinaryExpression, BinaryOperator, ElseBranch, ElseBranchValue,
-        Expression, FunctionCall, IfBranch, IfExpression, Literal, LiteralValue, Primary,
-        PrimaryAccess, ReturnExpression, Spanned, StringLiteral, UnaryExpression, UnaryOperator,
-        Value,
+        ElvisExpression, EnumVariantPattern, Expression, FunctionCall, IfBranch, IfExpression,
+        Literal, LiteralValue, MatchArm, MatchExpression, Pattern, Primary, PrimaryAccess,
+        ReturnExpression, SomePattern, SomeValue, Spanned, StringLiteral, UnaryExpression,
+        UnaryOperator, Value,
     },
     error::{Expected, ParseErrorKind, Scope, error_here, recover_until},
     lexer::{Lexer, TokenKind},
@@ -22,10 +23,44 @@ pub(super) fn parse_expression<'input, 'allocator>(
     match current_kind(lexer) {
         TokenKind::If => parse_if_expression(lexer, errors, allocator)
             .map(|expression| allocator.alloc(Expression::If(expression)) as &_),
+        TokenKind::Match => parse_match_expression(lexer, errors, allocator)
+            .map(|expression| allocator.alloc(Expression::Match(expression)) as &_),
         TokenKind::Return => parse_return_expression(lexer, errors, allocator)
             .map(|expression| allocator.alloc(Expression::Return(expression)) as &_),
-        _ => parse_binary_expression(lexer, errors, allocator, 1),
+        _ => parse_elvis_expression(lexer, errors, allocator),
     }
+}
+
+fn parse_elvis_expression<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut ParseErrors<'input, 'allocator>,
+    allocator: &'allocator Bump,
+) -> Option<&'allocator Expression<'input, 'allocator>> {
+    let optional = parse_binary_expression(lexer, errors, allocator, 1)?;
+    if current_kind(lexer) != TokenKind::Elvis {
+        return Some(optional);
+    }
+
+    lexer.next();
+    skip_line_feed(lexer);
+
+    let Some(fallback) = parse_expression(lexer, errors, allocator) else {
+        errors.push(error_here(
+            ParseErrorKind::InvalidElvisExpression,
+            lexer,
+            Expected::Expression,
+            Scope::ElvisExpression,
+        ));
+        return Some(optional);
+    };
+
+    Some(
+        allocator.alloc(Expression::Elvis(allocator.alloc(ElvisExpression {
+            optional,
+            fallback,
+            span: optional.span().start..fallback.span().end,
+        }))),
+    )
 }
 
 fn parse_binary_expression<'input, 'allocator>(
@@ -126,6 +161,7 @@ fn parse_primary<'input, 'allocator>(
     loop {
         let operator = match current_kind(lexer) {
             TokenKind::Dot => AccessOperator::Dot,
+            TokenKind::SafeDot => AccessOperator::SafeDot,
             TokenKind::DoubleColon => AccessOperator::DoubleColon,
             _ => break,
         };
@@ -179,6 +215,7 @@ fn parse_value<'input, 'allocator>(
 
     match token.kind {
         TokenKind::BracketLeft => parse_array(lexer, errors, allocator).map(Value::Array),
+        TokenKind::Some => parse_some_value(lexer, errors, allocator).map(Value::Some),
         TokenKind::Literal => {
             let anchor = lexer.cast_anchor();
             let token = lexer.next().unwrap();
@@ -209,6 +246,69 @@ fn parse_value<'input, 'allocator>(
         }
         _ => None,
     }
+}
+
+fn parse_some_value<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut ParseErrors<'input, 'allocator>,
+    allocator: &'allocator Bump,
+) -> Option<&'allocator SomeValue<'input, 'allocator>> {
+    if current_kind(lexer) != TokenKind::Some {
+        return None;
+    }
+
+    let anchor = lexer.cast_anchor();
+    lexer.next();
+
+    if current_kind(lexer) != TokenKind::ParenthesisLeft {
+        errors.push(error_here(
+            ParseErrorKind::InvalidSomeValue,
+            lexer,
+            Expected::Token(TokenKind::ParenthesisLeft),
+            Scope::SomeValue,
+        ));
+        return Some(allocator.alloc(SomeValue {
+            value: None,
+            span: anchor.elapsed(lexer),
+        }));
+    }
+    lexer.next();
+    skip_line_feed(lexer);
+
+    let value = parse_expression(lexer, errors, allocator);
+    if value.is_none() {
+        errors.push(error_here(
+            ParseErrorKind::InvalidSomeValue,
+            lexer,
+            Expected::Expression,
+            Scope::SomeValue,
+        ));
+    }
+
+    if current_kind(lexer) != TokenKind::ParenthesisRight {
+        let error = recover_until(
+            ParseErrorKind::InvalidSomeValue,
+            lexer,
+            &[
+                TokenKind::ParenthesisRight,
+                TokenKind::LineFeed,
+                TokenKind::Semicolon,
+                TokenKind::BraceRight,
+            ],
+            Expected::Token(TokenKind::ParenthesisRight),
+            Scope::SomeValue,
+            allocator,
+        );
+        errors.push(error);
+    }
+    if current_kind(lexer) == TokenKind::ParenthesisRight {
+        lexer.next();
+    }
+
+    Some(allocator.alloc(SomeValue {
+        value,
+        span: anchor.elapsed(lexer),
+    }))
 }
 
 fn parse_array<'input, 'allocator>(
@@ -327,7 +427,10 @@ fn parse_function_call<'input, 'allocator>(
 
     loop {
         if is_statement_start(current_kind(lexer))
-            && !matches!(current_kind(lexer), TokenKind::If | TokenKind::Return)
+            && !matches!(
+                current_kind(lexer),
+                TokenKind::If | TokenKind::Match | TokenKind::Return
+            )
         {
             break;
         }
@@ -511,6 +614,281 @@ fn parse_if_branch<'input, 'allocator>(
     }))
 }
 
+fn parse_match_expression<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut ParseErrors<'input, 'allocator>,
+    allocator: &'allocator Bump,
+) -> Option<&'allocator MatchExpression<'input, 'allocator>> {
+    if current_kind(lexer) != TokenKind::Match {
+        return None;
+    }
+
+    let anchor = lexer.cast_anchor();
+    lexer.next();
+
+    let Some(value) = parse_expression(lexer, errors, allocator) else {
+        let error = recover_until(
+            ParseErrorKind::InvalidMatchExpression,
+            lexer,
+            &[TokenKind::BraceLeft, TokenKind::LineFeed],
+            Expected::Expression,
+            Scope::MatchExpression,
+            allocator,
+        );
+        errors.push(error);
+        return None;
+    };
+
+    if current_kind(lexer) != TokenKind::BraceLeft {
+        let error = recover_until(
+            ParseErrorKind::InvalidMatchExpression,
+            lexer,
+            &[
+                TokenKind::BraceLeft,
+                TokenKind::LineFeed,
+                TokenKind::Semicolon,
+            ],
+            Expected::Token(TokenKind::BraceLeft),
+            Scope::MatchExpression,
+            allocator,
+        );
+        errors.push(error);
+    }
+    if current_kind(lexer) != TokenKind::BraceLeft {
+        return None;
+    }
+    lexer.next();
+    skip_line_feed(lexer);
+
+    let mut arms = Vec::new_in(allocator);
+    loop {
+        if is_statement_start(current_kind(lexer)) {
+            break;
+        }
+        match current_kind(lexer) {
+            TokenKind::BraceRight | TokenKind::None => break,
+            _ => {}
+        }
+
+        let arm_anchor = lexer.cast_anchor();
+        let Some(pattern) = parse_pattern(lexer, errors, allocator) else {
+            let error = recover_until(
+                ParseErrorKind::InvalidMatchArm,
+                lexer,
+                &[TokenKind::LineFeed, TokenKind::Comma, TokenKind::BraceRight],
+                Expected::Pattern,
+                Scope::MatchArm,
+                allocator,
+            );
+            errors.push(error);
+            if current_kind(lexer) == TokenKind::BraceRight {
+                break;
+            }
+            skip_list_separator(lexer);
+            continue;
+        };
+
+        if current_kind(lexer) != TokenKind::FatArrow {
+            let error = recover_until(
+                ParseErrorKind::InvalidMatchArm,
+                lexer,
+                &[
+                    TokenKind::FatArrow,
+                    TokenKind::LineFeed,
+                    TokenKind::Comma,
+                    TokenKind::BraceRight,
+                ],
+                Expected::Token(TokenKind::FatArrow),
+                Scope::MatchArm,
+                allocator,
+            );
+            errors.push(error);
+        }
+        if current_kind(lexer) != TokenKind::FatArrow {
+            if current_kind(lexer) == TokenKind::BraceRight {
+                break;
+            }
+            skip_list_separator(lexer);
+            continue;
+        }
+        lexer.next();
+        skip_line_feed(lexer);
+
+        let Some(arm_value) = parse_expression(lexer, errors, allocator) else {
+            let error = recover_until(
+                ParseErrorKind::InvalidMatchArm,
+                lexer,
+                &[TokenKind::LineFeed, TokenKind::Comma, TokenKind::BraceRight],
+                Expected::Expression,
+                Scope::MatchArm,
+                allocator,
+            );
+            errors.push(error);
+            if current_kind(lexer) == TokenKind::BraceRight {
+                break;
+            }
+            skip_list_separator(lexer);
+            continue;
+        };
+
+        arms.push(MatchArm {
+            pattern,
+            value: arm_value,
+            span: arm_anchor.elapsed(lexer),
+        });
+
+        if current_kind(lexer) == TokenKind::BraceRight {
+            break;
+        }
+        if !skip_list_separator(lexer) {
+            let error = recover_until(
+                ParseErrorKind::InvalidMatchArm,
+                lexer,
+                &[TokenKind::LineFeed, TokenKind::Comma, TokenKind::BraceRight],
+                Expected::Token(TokenKind::Comma),
+                Scope::MatchArm,
+                allocator,
+            );
+            errors.push(error);
+            skip_list_separator(lexer);
+        }
+    }
+
+    if current_kind(lexer) != TokenKind::BraceRight {
+        let error = if is_statement_start(current_kind(lexer)) {
+            error_here(
+                ParseErrorKind::NonClosedBrace,
+                lexer,
+                Expected::Token(TokenKind::BraceRight),
+                Scope::MatchExpression,
+            )
+        } else {
+            recover_until(
+                ParseErrorKind::NonClosedBrace,
+                lexer,
+                &[TokenKind::BraceRight],
+                Expected::Token(TokenKind::BraceRight),
+                Scope::MatchExpression,
+                allocator,
+            )
+        };
+        errors.push(error);
+    }
+    if current_kind(lexer) == TokenKind::BraceRight {
+        lexer.next();
+    }
+
+    let arms = allocator.alloc_slice_fill_iter(arms);
+    Some(allocator.alloc(MatchExpression {
+        value,
+        arms,
+        span: anchor.elapsed(lexer),
+    }))
+}
+
+fn parse_pattern<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut ParseErrors<'input, 'allocator>,
+    allocator: &'allocator Bump,
+) -> Option<Pattern<'input, 'allocator>> {
+    let anchor = lexer.cast_anchor();
+
+    match current_kind(lexer) {
+        TokenKind::Some => {
+            lexer.next();
+            if current_kind(lexer) != TokenKind::ParenthesisLeft {
+                errors.push(error_here(
+                    ParseErrorKind::InvalidPattern,
+                    lexer,
+                    Expected::Token(TokenKind::ParenthesisLeft),
+                    Scope::Pattern,
+                ));
+                return None;
+            }
+            lexer.next();
+
+            let Some(pattern) = parse_pattern(lexer, errors, allocator) else {
+                errors.push(error_here(
+                    ParseErrorKind::InvalidPattern,
+                    lexer,
+                    Expected::Pattern,
+                    Scope::Pattern,
+                ));
+                return None;
+            };
+
+            if current_kind(lexer) != TokenKind::ParenthesisRight {
+                let error = recover_until(
+                    ParseErrorKind::InvalidPattern,
+                    lexer,
+                    &[
+                        TokenKind::ParenthesisRight,
+                        TokenKind::FatArrow,
+                        TokenKind::LineFeed,
+                        TokenKind::Comma,
+                        TokenKind::BraceRight,
+                    ],
+                    Expected::Token(TokenKind::ParenthesisRight),
+                    Scope::Pattern,
+                    allocator,
+                );
+                errors.push(error);
+            }
+            if current_kind(lexer) == TokenKind::ParenthesisRight {
+                lexer.next();
+            }
+
+            Some(Pattern::Some(allocator.alloc(SomePattern {
+                pattern: allocator.alloc(pattern),
+                span: anchor.elapsed(lexer),
+            })))
+        }
+        TokenKind::Null => {
+            let token = lexer.next().unwrap();
+            Some(Pattern::Null(Spanned::new((), token.span)))
+        }
+        TokenKind::Literal => {
+            let token = lexer.next().unwrap();
+            if token.text == "_" {
+                return Some(Pattern::Wildcard(Spanned::new((), token.span)));
+            }
+
+            let name = Literal::new(token.text, token.span);
+            if current_kind(lexer) != TokenKind::DoubleColon {
+                return Some(Pattern::Binding(name));
+            }
+            lexer.next();
+
+            let Some(variant) = lexer.current() else {
+                errors.push(error_here(
+                    ParseErrorKind::InvalidPattern,
+                    lexer,
+                    Expected::Literal,
+                    Scope::Pattern,
+                ));
+                return None;
+            };
+            if variant.kind != TokenKind::Literal {
+                errors.push(error_here(
+                    ParseErrorKind::InvalidPattern,
+                    lexer,
+                    Expected::Literal,
+                    Scope::Pattern,
+                ));
+                return None;
+            }
+            let variant = lexer.next().unwrap();
+
+            Some(Pattern::EnumVariant(allocator.alloc(EnumVariantPattern {
+                enum_name: name,
+                variant: Literal::new(variant.text, variant.span),
+                span: anchor.elapsed(lexer),
+            })))
+        }
+        _ => None,
+    }
+}
+
 fn parse_return_expression<'input, 'allocator>(
     lexer: &mut Lexer<'input>,
     errors: &mut ParseErrors<'input, 'allocator>,
@@ -569,12 +947,14 @@ fn binary_operator(kind: TokenKind) -> Option<(BinaryOperator, u8)> {
     }
 }
 
-fn expression_end_tokens() -> [TokenKind; 8] {
+fn expression_end_tokens() -> [TokenKind; 10] {
     [
         TokenKind::LineFeed,
         TokenKind::Semicolon,
         TokenKind::Comma,
         TokenKind::Equal,
+        TokenKind::FatArrow,
+        TokenKind::Elvis,
         TokenKind::BraceLeft,
         TokenKind::BraceRight,
         TokenKind::BracketRight,

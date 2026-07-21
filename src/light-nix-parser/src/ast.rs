@@ -265,7 +265,9 @@ impl_ast!(impl<'input, 'allocator> for Block<'input, 'allocator>);
 #[derive(Debug, Clone, Copy)]
 pub enum Expression<'input, 'allocator> {
     If(&'allocator IfExpression<'input, 'allocator>),
+    Match(&'allocator MatchExpression<'input, 'allocator>),
     Return(&'allocator ReturnExpression<'input, 'allocator>),
+    Elvis(&'allocator ElvisExpression<'input, 'allocator>),
     Binary(&'allocator BinaryExpression<'input, 'allocator>),
     Unary(&'allocator UnaryExpression<'input, 'allocator>),
     Primary(&'allocator Primary<'input, 'allocator>),
@@ -275,7 +277,9 @@ impl AST for Expression<'_, '_> {
     fn span(&self) -> Range<usize> {
         match self {
             Self::If(node) => node.span(),
+            Self::Match(node) => node.span(),
             Self::Return(node) => node.span(),
+            Self::Elvis(node) => node.span(),
             Self::Binary(node) => node.span(),
             Self::Unary(node) => node.span(),
             Self::Primary(node) => node.span(),
@@ -326,12 +330,77 @@ impl AST for ElseBranchValue<'_, '_> {
 }
 
 #[derive(Debug)]
+pub struct MatchExpression<'input, 'allocator> {
+    pub value: &'allocator Expression<'input, 'allocator>,
+    pub arms: &'allocator [MatchArm<'input, 'allocator>],
+    pub span: Range<usize>,
+}
+
+impl_ast!(impl<'input, 'allocator> for MatchExpression<'input, 'allocator>);
+
+#[derive(Debug)]
+pub struct MatchArm<'input, 'allocator> {
+    pub pattern: Pattern<'input, 'allocator>,
+    pub value: &'allocator Expression<'input, 'allocator>,
+    pub span: Range<usize>,
+}
+
+impl_ast!(impl<'input, 'allocator> for MatchArm<'input, 'allocator>);
+
+#[derive(Debug)]
+pub enum Pattern<'input, 'allocator> {
+    Some(&'allocator SomePattern<'input, 'allocator>),
+    Null(Spanned<()>),
+    Wildcard(Spanned<()>),
+    Binding(Literal<'input>),
+    EnumVariant(&'allocator EnumVariantPattern<'input>),
+}
+
+impl AST for Pattern<'_, '_> {
+    fn span(&self) -> Range<usize> {
+        match self {
+            Self::Some(node) => node.span(),
+            Self::Null(node) => node.span(),
+            Self::Wildcard(node) => node.span(),
+            Self::Binding(node) => node.span(),
+            Self::EnumVariant(node) => node.span(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct SomePattern<'input, 'allocator> {
+    pub pattern: &'allocator Pattern<'input, 'allocator>,
+    pub span: Range<usize>,
+}
+
+impl_ast!(impl<'input, 'allocator> for SomePattern<'input, 'allocator>);
+
+#[derive(Debug)]
+pub struct EnumVariantPattern<'input> {
+    pub enum_name: Literal<'input>,
+    pub variant: Literal<'input>,
+    pub span: Range<usize>,
+}
+
+impl_ast!(impl<'input> for EnumVariantPattern<'input>);
+
+#[derive(Debug)]
 pub struct ReturnExpression<'input, 'allocator> {
     pub value: Option<&'allocator Expression<'input, 'allocator>>,
     pub span: Range<usize>,
 }
 
 impl_ast!(impl<'input, 'allocator> for ReturnExpression<'input, 'allocator>);
+
+#[derive(Debug)]
+pub struct ElvisExpression<'input, 'allocator> {
+    pub optional: &'allocator Expression<'input, 'allocator>,
+    pub fallback: &'allocator Expression<'input, 'allocator>,
+    pub span: Range<usize>,
+}
+
+impl_ast!(impl<'input, 'allocator> for ElvisExpression<'input, 'allocator>);
 
 #[derive(Debug)]
 pub struct BinaryExpression<'input, 'allocator> {
@@ -396,6 +465,7 @@ impl_ast!(impl<'input, 'allocator> for PrimaryAccess<'input, 'allocator>);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AccessOperator {
     Dot,
+    SafeDot,
     DoubleColon,
 }
 
@@ -403,6 +473,7 @@ pub enum AccessOperator {
 pub enum Value<'input, 'allocator> {
     Array(&'allocator Array<'input, 'allocator>),
     Literal(LiteralValue<'input, 'allocator>),
+    Some(&'allocator SomeValue<'input, 'allocator>),
     Numeric(NumericLiteral<'input>),
     String(StringLiteral<'input>),
     Boolean(Spanned<bool>),
@@ -414,6 +485,7 @@ impl AST for Value<'_, '_> {
         match self {
             Self::Array(node) => node.span(),
             Self::Literal(node) => node.span(),
+            Self::Some(node) => node.span(),
             Self::Numeric(node) => node.span(),
             Self::String(node) => node.span(),
             Self::Boolean(node) => node.span(),
@@ -430,6 +502,14 @@ pub struct LiteralValue<'input, 'allocator> {
 }
 
 impl_ast!(impl<'input, 'allocator> for LiteralValue<'input, 'allocator>);
+
+#[derive(Debug)]
+pub struct SomeValue<'input, 'allocator> {
+    pub value: Option<&'allocator Expression<'input, 'allocator>>,
+    pub span: Range<usize>,
+}
+
+impl_ast!(impl<'input, 'allocator> for SomeValue<'input, 'allocator>);
 
 #[derive(Debug)]
 pub struct Array<'input, 'allocator> {
@@ -451,6 +531,7 @@ impl_ast!(impl<'input, 'allocator> for FunctionCall<'input, 'allocator>);
 pub struct TypeInfo<'input, 'allocator> {
     pub name: Literal<'input>,
     pub parameter: Option<&'allocator TypeInfo<'input, 'allocator>>,
+    pub optional: bool,
     pub span: Range<usize>,
 }
 

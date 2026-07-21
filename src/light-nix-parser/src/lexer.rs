@@ -35,6 +35,10 @@ pub enum TokenKind {
     Else,
     /// return
     Return,
+    /// match
+    Match,
+    /// some
+    Some,
     /// or
     Or,
     /// and
@@ -69,6 +73,12 @@ pub enum TokenKind {
     Dot,
     /// ->
     ThinArrow,
+    /// =>
+    FatArrow,
+    /// ?.
+    SafeDot,
+    /// ?:
+    Elvis,
     /// ::
     DoubleColon,
     /// :
@@ -93,6 +103,8 @@ pub enum TokenKind {
     BracketRight,
     /// |
     VerticalLine,
+    /// ?
+    Question,
     /// e.g. 42, 6.3, 5E+2
     NumericLiteral,
     /// e.g. literal
@@ -128,6 +140,8 @@ static TOKENIZERS: &[Tokenizer] = &[
     Tokenizer::Keyword(TokenKind::If, "if"),
     Tokenizer::Keyword(TokenKind::Else, "else"),
     Tokenizer::Keyword(TokenKind::Return, "return"),
+    Tokenizer::Keyword(TokenKind::Match, "match"),
+    Tokenizer::Keyword(TokenKind::Some, "some"),
     Tokenizer::Keyword(TokenKind::Or, "or"),
     Tokenizer::Keyword(TokenKind::And, "and"),
     Tokenizer::Keyword(TokenKind::True, "true"),
@@ -139,6 +153,9 @@ static TOKENIZERS: &[Tokenizer] = &[
     Tokenizer::Keyword(TokenKind::LessThanOrEqual, "<="),
     Tokenizer::Keyword(TokenKind::GreaterThanOrEqual, ">="),
     Tokenizer::Keyword(TokenKind::ThinArrow, "->"),
+    Tokenizer::Keyword(TokenKind::FatArrow, "=>"),
+    Tokenizer::Keyword(TokenKind::SafeDot, "?."),
+    Tokenizer::Keyword(TokenKind::Elvis, "?:"),
     Tokenizer::Keyword(TokenKind::DoubleColon, "::"),
     // Single-character operators
     Tokenizer::Keyword(TokenKind::LessThan, "<"),
@@ -153,6 +170,7 @@ static TOKENIZERS: &[Tokenizer] = &[
     Tokenizer::Keyword(TokenKind::Comma, ","),
     Tokenizer::Keyword(TokenKind::Semicolon, ";"),
     Tokenizer::Keyword(TokenKind::VerticalLine, "|"),
+    Tokenizer::Keyword(TokenKind::Question, "?"),
     // Delimiters
     Tokenizer::Keyword(TokenKind::ParenthesisLeft, "("),
     Tokenizer::Keyword(TokenKind::ParenthesisRight, ")"),
@@ -448,6 +466,35 @@ if profile == Profile::Desktop {
             .collect::<Vec<_>>();
 
         assert_eq!(kinds, [TokenKind::Literal, TokenKind::Literal]);
+    }
+
+    #[test]
+    fn tokenizes_optional_and_match_syntax() {
+        let kinds = Lexer::new("match value?.field ?: some(value) { null => value } T?")
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            kinds,
+            [
+                TokenKind::Match,
+                TokenKind::Literal,
+                TokenKind::SafeDot,
+                TokenKind::Literal,
+                TokenKind::Elvis,
+                TokenKind::Some,
+                TokenKind::ParenthesisLeft,
+                TokenKind::Literal,
+                TokenKind::ParenthesisRight,
+                TokenKind::BraceLeft,
+                TokenKind::Null,
+                TokenKind::FatArrow,
+                TokenKind::Literal,
+                TokenKind::BraceRight,
+                TokenKind::Literal,
+                TokenKind::Question,
+            ]
+        );
     }
 
     #[test]

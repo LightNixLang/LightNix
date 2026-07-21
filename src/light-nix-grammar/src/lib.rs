@@ -47,10 +47,19 @@ mod grammar {
 
         block                ::= "{" statements "}"
 
-        expression           ::= or_expr | if_expression | return_expression
+        expression           ::= elvis_expr | if_expression | match_expression | return_expression
+
+        elvis_expr           ::= or_expr [ "?:" expression ]
 
         if_expression        ::= if_branch { "else" ( if_branch | block ) }
         if_branch            ::= "if" expression block
+
+        match_expression     ::= "match" expression "{" [ lf ] { match_arm lf_or_comma } "}"
+        match_arm            ::= match_pattern "=>" expression
+        match_pattern        ::= "some" "(" match_pattern ")"
+                                 | "null"
+                                 | "_"
+                                 | literal [ "::" literal ]
 
         return_expression    ::= "return" [ expression ]
 
@@ -62,19 +71,21 @@ mod grammar {
         mul_or_div_expr      ::= factor { ( "*" | "/" ) factor }
         factor               ::= ( "+" | "-" ) primary | primary
 
-        primary              ::= value { ( "." | "::" ) [ lf ] literal [ function_call ] }
+        primary              ::= value { ( "." | "?." | "::" ) [ lf ] literal [ function_call ] }
         value                ::= array
                                  | literal [ function_call ]
+                                 | some_value
                                  | numeric_literal
                                  | string_literal
                                  | "true"
                                  | "false"
                                  | "null"
         array                ::= "[" [ lf ] { value lf_or_comma } "]"
+        some_value           ::= "some" "(" expression ")"
 
         function_call        ::= "(" [ lf ] { expression lf_or_comma } ")"
 
-        type_info            ::= literal [ "<" type_info ">" ]
+        type_info            ::= literal [ "<" type_info ">" ] [ "?" ]
 
         literal              ::= r"\w+"
 

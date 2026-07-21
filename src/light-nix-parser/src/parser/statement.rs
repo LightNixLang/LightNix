@@ -692,7 +692,10 @@ fn parse_assign_or_expression_statement<'input, 'allocator>(
     let target = parse_expression(lexer, errors, allocator)?;
 
     if current_kind(lexer) != TokenKind::Equal {
-        if matches!(target, Expression::If(_) | Expression::Return(_)) {
+        if matches!(
+            target,
+            Expression::If(_) | Expression::Match(_) | Expression::Return(_)
+        ) {
             return Some(Statement::Expression(target));
         }
         lexer.back_to_anchor(anchor);
@@ -1000,9 +1003,36 @@ fn parse_type_info<'input, 'allocator>(
         None
     };
 
+    let optional = if current_kind(lexer) == TokenKind::Question {
+        lexer.next();
+        true
+    } else {
+        false
+    };
+
+    if optional && current_kind(lexer) == TokenKind::Question {
+        let error = recover_until(
+            ParseErrorKind::InvalidTypeInfo,
+            lexer,
+            &[
+                TokenKind::GreaterThan,
+                TokenKind::Equal,
+                TokenKind::LineFeed,
+                TokenKind::Comma,
+                TokenKind::BraceRight,
+                TokenKind::ParenthesisRight,
+            ],
+            Expected::TypeInfo,
+            Scope::TypeInfo,
+            allocator,
+        );
+        errors.push(error);
+    }
+
     Some(allocator.alloc(TypeInfo {
         name,
         parameter,
+        optional,
         span: anchor.elapsed(lexer),
     }))
 }
@@ -1228,7 +1258,10 @@ mod tests {
     use bumpalo::Bump;
 
     use crate::{
-        ast::{BinaryOperator, Expression, MutationPolicyKind, Statement, TypedefValue, Value},
+        ast::{
+            AccessOperator, BinaryOperator, Expression, MutationPolicyKind, Pattern, Statement,
+            TypedefValue, Value,
+        },
         error::ParseErrorKind,
         lexer::Lexer,
         parser::parse_source,
@@ -1397,6 +1430,164 @@ enum Desktop: string {
             panic!("expected GNOME string value");
         };
         assert_eq!(gnome_value.value, "\"gnome\"");
+    }
+
+    #[test]
+    fn parses_optional_types_safe_access_elvis_some_and_match() {
+        let source = r#"
+let parsed: Desktop? = Desktop::from_repr(input)
+let name: string = parsed?.profile?.name ?: "unknown"
+let wrapped: List<string?>? = some([])
+let selected: string = match parsed {
+    some(Desktop::KDE) => "kde",
+    some(value) => value.to_repr()
+    null => "none"
+}
+"#;
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert!(errors.is_empty(), "parse errors: {errors:#?}");
+        assert_eq!(ast.statements.len(), 4);
+
+        let Statement::LetStatement(parsed) = &ast.statements[0] else {
+            panic!("expected parsed binding");
+        };
+        assert!(parsed.type_info.unwrap().optional);
+        let Expression::Primary(from_repr) = parsed.value.unwrap() else {
+            panic!("expected from_repr call");
+        };
+        assert_eq!(from_repr.accesses.len(), 1);
+        assert_eq!(
+            from_repr.accesses[0].operator.value,
+            AccessOperator::DoubleColon
+        );
+        assert_eq!(from_repr.accesses[0].member.value, "from_repr");
+
+        let Statement::LetStatement(name) = &ast.statements[1] else {
+            panic!("expected name binding");
+        };
+        assert!(!name.type_info.unwrap().optional);
+        let Expression::Elvis(name) = name.value.unwrap() else {
+            panic!("expected Elvis expression");
+        };
+        let Expression::Primary(safe_chain) = name.optional else {
+            panic!("expected safe access chain");
+        };
+        assert_eq!(safe_chain.accesses.len(), 2);
+        assert!(
+            safe_chain
+                .accesses
+                .iter()
+                .all(|access| access.operator.value == AccessOperator::SafeDot)
+        );
+        let Expression::Primary(fallback) = name.fallback else {
+            panic!("expected string fallback");
+        };
+        assert!(matches!(fallback.value, Value::String(_)));
+
+        let Statement::LetStatement(wrapped) = &ast.statements[2] else {
+            panic!("expected wrapped binding");
+        };
+        let wrapped_type = wrapped.type_info.unwrap();
+        assert!(wrapped_type.optional);
+        assert!(wrapped_type.parameter.unwrap().optional);
+        let Expression::Primary(wrapped) = wrapped.value.unwrap() else {
+            panic!("expected some value");
+        };
+        let Value::Some(wrapped) = wrapped.value else {
+            panic!("expected some constructor");
+        };
+        assert!(wrapped.value.is_some());
+
+        let Statement::LetStatement(selected) = &ast.statements[3] else {
+            panic!("expected selected binding");
+        };
+        let Expression::Match(selected) = selected.value.unwrap() else {
+            panic!("expected match expression");
+        };
+        let [kde, value, null] = selected.arms else {
+            panic!("expected three match arms");
+        };
+        let Pattern::Some(kde) = &kde.pattern else {
+            panic!("expected some enum pattern");
+        };
+        let Pattern::EnumVariant(kde) = kde.pattern else {
+            panic!("expected KDE enum pattern");
+        };
+        assert_eq!(kde.enum_name.value, "Desktop");
+        assert_eq!(kde.variant.value, "KDE");
+
+        let Pattern::Some(value) = &value.pattern else {
+            panic!("expected some binding pattern");
+        };
+        let Pattern::Binding(value) = value.pattern else {
+            panic!("expected value binding");
+        };
+        assert_eq!(value.value, "value");
+        assert!(matches!(null.pattern, Pattern::Null(_)));
+    }
+
+    #[test]
+    fn elvis_operator_is_right_associative() {
+        let source = "let value = first ?: second ?: third";
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert!(errors.is_empty(), "parse errors: {errors:#?}");
+        let Statement::LetStatement(value) = &ast.statements[0] else {
+            panic!("expected value binding");
+        };
+        let Expression::Elvis(value) = value.value.unwrap() else {
+            panic!("expected outer Elvis expression");
+        };
+        assert!(matches!(value.fallback, Expression::Elvis(_)));
+    }
+
+    #[test]
+    fn optional_and_match_errors_recover_to_following_constructs() {
+        let source = r#"
+let broken: string?? = null
+let selected = match broken {
+    some(value) value
+    null => "none"
+}
+let recovered = true
+"#;
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert_eq!(errors.len(), 2, "parse errors: {errors:#?}");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.kind == ParseErrorKind::InvalidTypeInfo)
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.kind == ParseErrorKind::InvalidMatchArm)
+        );
+        assert_eq!(ast.statements.len(), 3);
+
+        let Statement::LetStatement(selected) = &ast.statements[1] else {
+            panic!("expected recovered match binding");
+        };
+        let Expression::Match(selected) = selected.value.unwrap() else {
+            panic!("expected recovered match expression");
+        };
+        assert_eq!(selected.arms.len(), 1);
+        assert!(matches!(selected.arms[0].pattern, Pattern::Null(_)));
+        assert!(matches!(ast.statements[2], Statement::LetStatement(_)));
     }
 
     #[test]
