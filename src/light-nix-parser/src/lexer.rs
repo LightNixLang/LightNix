@@ -15,6 +15,12 @@ pub enum TokenKind {
     Use,
     /// tunable
     Tunable,
+    /// readonly
+    Readonly,
+    /// declare
+    Declare,
+    /// cost
+    Cost,
     /// host
     Host,
     /// let
@@ -114,6 +120,9 @@ static TOKENIZERS: &[Tokenizer] = &[
     Tokenizer::Keyword(TokenKind::Type, "type"),
     Tokenizer::Keyword(TokenKind::Use, "use"),
     Tokenizer::Keyword(TokenKind::Tunable, "tunable"),
+    Tokenizer::Keyword(TokenKind::Readonly, "readonly"),
+    Tokenizer::Keyword(TokenKind::Declare, "declare"),
+    Tokenizer::Keyword(TokenKind::Cost, "cost"),
     Tokenizer::Keyword(TokenKind::Host, "host"),
     Tokenizer::Keyword(TokenKind::Let, "let"),
     Tokenizer::Keyword(TokenKind::Function, "function"),

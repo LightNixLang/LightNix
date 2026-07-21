@@ -149,6 +149,7 @@ impl_ast!(impl<'input, 'allocator> for TypedefBlock<'input, 'allocator>);
 
 #[derive(Debug)]
 pub struct Typedef<'input, 'allocator> {
+    pub policy: Option<MutationPolicy>,
     pub name: Literal<'input>,
     pub value: TypedefValue<'input, 'allocator>,
     pub span: Range<usize>,
@@ -190,7 +191,8 @@ impl_ast!(impl<'input, 'allocator> for HostDefine<'input, 'allocator>);
 
 #[derive(Debug)]
 pub struct LetStatement<'input, 'allocator> {
-    pub tunable: bool,
+    pub declare: bool,
+    pub policy: Option<MutationPolicy>,
     pub name: Literal<'input>,
     pub type_info: Option<&'allocator TypeInfo<'input, 'allocator>>,
     pub value: Option<&'allocator Expression<'input, 'allocator>>,
@@ -198,6 +200,24 @@ pub struct LetStatement<'input, 'allocator> {
 }
 
 impl_ast!(impl<'input, 'allocator> for LetStatement<'input, 'allocator>);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MutationPolicy {
+    pub kind: MutationPolicyKind,
+    pub span: Range<usize>,
+}
+
+impl AST for MutationPolicy {
+    fn span(&self) -> Range<usize> {
+        self.span.clone()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum MutationPolicyKind {
+    Readonly,
+    Tunable { cost: Option<Spanned<u64>> },
+}
 
 #[derive(Debug)]
 pub struct AssignStatement<'input, 'allocator> {

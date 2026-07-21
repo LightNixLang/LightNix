@@ -5,8 +5,8 @@ use crate::{
     ast::{
         AssignStatement, Block, EnumDefine, Expression, FunctionArgument, FunctionArguments,
         FunctionAttribute, FunctionDefine, HostDefine, Inputs, InputsElement, LetStatement,
-        Literal, Source, Spanned, Statement, Statements, StringLiteral, TypeDefine, TypeInfo,
-        Typedef, TypedefBlock, TypedefValue, UseDeclare,
+        Literal, MutationPolicy, MutationPolicyKind, Source, Spanned, Statement, Statements,
+        StringLiteral, TypeDefine, TypeInfo, Typedef, TypedefBlock, TypedefValue, UseDeclare,
     },
     error::{Expected, ParseErrorKind, Scope, error_here, recover_until},
     lexer::{Lexer, TokenKind},
@@ -125,7 +125,7 @@ fn parse_statement<'input, 'allocator>(
         TokenKind::Type => parse_type_define(lexer, errors, allocator).map(Statement::TypeDefine),
         TokenKind::Use => parse_use_declare(lexer, errors, allocator).map(Statement::UseDeclare),
         TokenKind::Host => parse_host_define(lexer, errors, allocator).map(Statement::HostDefine),
-        TokenKind::Let => {
+        TokenKind::Let | TokenKind::Declare => {
             parse_let_statement(lexer, errors, allocator).map(Statement::LetStatement)
         }
         TokenKind::Inline | TokenKind::Opaque => {
@@ -424,6 +424,7 @@ fn parse_typedef_block<'input, 'allocator>(
         }
 
         let field_anchor = lexer.cast_anchor();
+        let policy = parse_mutation_policy(lexer, errors, allocator);
         let Some(name) = parse_literal(lexer) else {
             let error = recover_until(
                 ParseErrorKind::InvalidTypedef,
@@ -477,6 +478,7 @@ fn parse_typedef_block<'input, 'allocator>(
         };
 
         fields.push(Typedef {
+            policy,
             name,
             value,
             span: field_anchor.elapsed(lexer),
@@ -637,18 +639,30 @@ fn parse_let_statement<'input, 'allocator>(
     errors: &mut ParseErrors<'input, 'allocator>,
     allocator: &'allocator Bump,
 ) -> Option<&'allocator LetStatement<'input, 'allocator>> {
-    if current_kind(lexer) != TokenKind::Let {
+    if !matches!(current_kind(lexer), TokenKind::Declare | TokenKind::Let) {
         return None;
     }
 
     let anchor = lexer.cast_anchor();
-    lexer.next();
-    let tunable = if current_kind(lexer) == TokenKind::Tunable {
+    let declare = if current_kind(lexer) == TokenKind::Declare {
         lexer.next();
         true
     } else {
         false
     };
+
+    if current_kind(lexer) != TokenKind::Let {
+        errors.push(error_here(
+            ParseErrorKind::InvalidLetStatement,
+            lexer,
+            Expected::Token(TokenKind::Let),
+            Scope::LetStatement,
+        ));
+        return None;
+    }
+    lexer.next();
+
+    let policy = parse_mutation_policy(lexer, errors, allocator);
 
     let Some(name) = parse_literal(lexer) else {
         errors.push(error_here(
@@ -706,7 +720,8 @@ fn parse_let_statement<'input, 'allocator>(
     };
 
     Some(allocator.alloc(LetStatement {
-        tunable,
+        declare,
+        policy,
         name,
         type_info,
         value,
@@ -1038,6 +1053,148 @@ fn parse_type_info<'input, 'allocator>(
     }))
 }
 
+fn parse_mutation_policy<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut ParseErrors<'input, 'allocator>,
+    allocator: &'allocator Bump,
+) -> Option<MutationPolicy> {
+    let anchor = lexer.cast_anchor();
+
+    if current_kind(lexer) == TokenKind::Readonly {
+        lexer.next();
+        return Some(MutationPolicy {
+            kind: MutationPolicyKind::Readonly,
+            span: anchor.elapsed(lexer),
+        });
+    }
+
+    if current_kind(lexer) != TokenKind::Tunable {
+        return None;
+    }
+    lexer.next();
+
+    let mut cost = None;
+
+    if current_kind(lexer) == TokenKind::ParenthesisLeft {
+        lexer.next();
+
+        if current_kind(lexer) != TokenKind::Cost {
+            let error = recover_until(
+                ParseErrorKind::InvalidMutationPolicy,
+                lexer,
+                &[
+                    TokenKind::Cost,
+                    TokenKind::Equal,
+                    TokenKind::NumericLiteral,
+                    TokenKind::ParenthesisRight,
+                ],
+                Expected::Token(TokenKind::Cost),
+                Scope::MutationPolicy,
+                allocator,
+            );
+            errors.push(error);
+        }
+        if current_kind(lexer) == TokenKind::Cost {
+            lexer.next();
+        }
+
+        if current_kind(lexer) != TokenKind::Equal {
+            let error = recover_until(
+                ParseErrorKind::InvalidMutationPolicy,
+                lexer,
+                &[
+                    TokenKind::Equal,
+                    TokenKind::NumericLiteral,
+                    TokenKind::ParenthesisRight,
+                ],
+                Expected::Token(TokenKind::Equal),
+                Scope::MutationPolicy,
+                allocator,
+            );
+            errors.push(error);
+        }
+        if current_kind(lexer) == TokenKind::Equal {
+            lexer.next();
+        }
+
+        if current_kind(lexer) == TokenKind::NumericLiteral {
+            let token = lexer.current().unwrap();
+            if let Some(value) = parse_policy_cost(token.text) {
+                let token = lexer.next().unwrap();
+                cost = Some(Spanned::new(value, token.span));
+            } else {
+                let error = recover_until(
+                    ParseErrorKind::InvalidMutationPolicy,
+                    lexer,
+                    &[
+                        TokenKind::ParenthesisRight,
+                        TokenKind::Literal,
+                        TokenKind::LineFeed,
+                        TokenKind::Comma,
+                        TokenKind::BraceRight,
+                    ],
+                    Expected::IntegerLiteral,
+                    Scope::MutationPolicy,
+                    allocator,
+                );
+                errors.push(error);
+            }
+        } else {
+            errors.push(error_here(
+                ParseErrorKind::InvalidMutationPolicy,
+                lexer,
+                Expected::IntegerLiteral,
+                Scope::MutationPolicy,
+            ));
+        }
+
+        if current_kind(lexer) != TokenKind::ParenthesisRight {
+            let error = recover_until(
+                ParseErrorKind::NonClosedParenthesis,
+                lexer,
+                &[
+                    TokenKind::ParenthesisRight,
+                    TokenKind::Literal,
+                    TokenKind::LineFeed,
+                    TokenKind::Comma,
+                    TokenKind::BraceRight,
+                ],
+                Expected::Token(TokenKind::ParenthesisRight),
+                Scope::MutationPolicy,
+                allocator,
+            );
+            errors.push(error);
+        }
+        if current_kind(lexer) == TokenKind::ParenthesisRight {
+            lexer.next();
+        }
+    }
+
+    Some(MutationPolicy {
+        kind: MutationPolicyKind::Tunable { cost },
+        span: anchor.elapsed(lexer),
+    })
+}
+
+fn parse_policy_cost(text: &str) -> Option<u64> {
+    let mut value = 0_u64;
+    let mut found_digit = false;
+
+    for byte in text.bytes() {
+        if byte == b'_' {
+            continue;
+        }
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+
+        found_digit = true;
+        value = value.checked_mul(10)?.checked_add(u64::from(byte - b'0'))?;
+    }
+
+    found_digit.then_some(value)
+}
+
 fn parse_literal<'input>(lexer: &mut Lexer<'input>) -> Option<Literal<'input>> {
     if current_kind(lexer) != TokenKind::Literal {
         return None;
@@ -1117,7 +1274,7 @@ mod tests {
     use bumpalo::Bump;
 
     use crate::{
-        ast::{BinaryOperator, Expression, Statement, TypedefValue},
+        ast::{BinaryOperator, Expression, MutationPolicyKind, Statement, TypedefValue},
         error::ParseErrorKind,
         lexer::Lexer,
         parser::parse_source,
@@ -1338,7 +1495,10 @@ let tunable complete: List<String> = []
         let Statement::LetStatement(complete) = &ast.statements[3] else {
             panic!("expected complete let");
         };
-        assert!(complete.tunable);
+        assert!(matches!(
+            complete.policy.as_ref().map(|policy| &policy.kind),
+            Some(MutationPolicyKind::Tunable { cost: None })
+        ));
         assert_eq!(complete.type_info.unwrap().name.value, "List");
         assert_eq!(
             complete.type_info.unwrap().parameter.unwrap().name.value,
@@ -1369,5 +1529,111 @@ let recovered
         assert!(broken.type_info.is_none());
         assert!(broken.value.is_some());
         assert!(matches!(ast.statements[1], Statement::LetStatement(_)));
+    }
+
+    #[test]
+    fn parses_binding_and_field_mutation_policies() {
+        let source = r#"
+type Programs {
+    readonly example0: Example0,
+    tunable(cost = 200) example1: Example1,
+    example2: Example2
+}
+declare let tunable(cost = 1) programs: Programs
+let readonly snapshot: Programs
+"#;
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert!(errors.is_empty(), "parse errors: {errors:#?}");
+        assert_eq!(ast.statements.len(), 3);
+
+        let Statement::TypeDefine(programs_type) = &ast.statements[0] else {
+            panic!("expected Programs type");
+        };
+        let [example0, example1, example2] = programs_type.body.fields else {
+            panic!("expected three fields");
+        };
+        assert!(matches!(
+            example0.policy.as_ref().map(|policy| &policy.kind),
+            Some(MutationPolicyKind::Readonly)
+        ));
+        let Some(MutationPolicyKind::Tunable { cost: Some(cost) }) =
+            example1.policy.as_ref().map(|policy| &policy.kind)
+        else {
+            panic!("expected costed tunable field");
+        };
+        assert_eq!(cost.value, 200);
+        assert!(example2.policy.is_none());
+
+        let Statement::LetStatement(programs) = &ast.statements[1] else {
+            panic!("expected programs declaration");
+        };
+        assert!(programs.declare);
+        let Some(MutationPolicyKind::Tunable { cost: Some(cost) }) =
+            programs.policy.as_ref().map(|policy| &policy.kind)
+        else {
+            panic!("expected costed tunable declaration");
+        };
+        assert_eq!(cost.value, 1);
+
+        let Statement::LetStatement(snapshot) = &ast.statements[2] else {
+            panic!("expected snapshot binding");
+        };
+        assert!(!snapshot.declare);
+        assert!(matches!(
+            snapshot.policy.as_ref().map(|policy| &policy.kind),
+            Some(MutationPolicyKind::Readonly)
+        ));
+    }
+
+    #[test]
+    fn invalid_policy_cost_recovers_to_the_field_and_binding() {
+        let source = r#"
+type Programs {
+    tunable(cost = 1.5) example: Example,
+    readonly safe: Safe
+}
+declare let tunable(cost =) programs: Programs
+let recovered = true
+"#;
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert_eq!(errors.len(), 2, "parse errors: {errors:#?}");
+        assert!(
+            errors
+                .iter()
+                .all(|error| error.kind == ParseErrorKind::InvalidMutationPolicy)
+        );
+        assert_eq!(ast.statements.len(), 3);
+
+        let Statement::TypeDefine(programs_type) = &ast.statements[0] else {
+            panic!("expected recovered Programs type");
+        };
+        assert_eq!(programs_type.body.fields.len(), 2);
+        assert!(matches!(
+            programs_type.body.fields[1]
+                .policy
+                .as_ref()
+                .map(|policy| &policy.kind),
+            Some(MutationPolicyKind::Readonly)
+        ));
+
+        let Statement::LetStatement(programs) = &ast.statements[1] else {
+            panic!("expected recovered declaration");
+        };
+        assert!(programs.declare);
+        assert!(matches!(
+            programs.policy.as_ref().map(|policy| &policy.kind),
+            Some(MutationPolicyKind::Tunable { cost: None })
+        ));
+        assert!(matches!(ast.statements[2], Statement::LetStatement(_)));
     }
 }

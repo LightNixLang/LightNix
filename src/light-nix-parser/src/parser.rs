@@ -29,6 +29,7 @@ pub(crate) fn is_statement_start(kind: TokenKind) -> bool {
             | TokenKind::Use
             | TokenKind::Host
             | TokenKind::Let
+            | TokenKind::Declare
             | TokenKind::Inline
             | TokenKind::Opaque
             | TokenKind::If

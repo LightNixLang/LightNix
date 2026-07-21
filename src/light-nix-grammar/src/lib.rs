@@ -26,14 +26,17 @@ mod grammar {
         enum_define          ::= "enum" literal "{" [ lf ] { literal lf_or_comma } "}"
 
         type_define          ::= "type" literal type_define_block
-        type_define_block    ::= "{" [ lf ] { type_define lf_or_comma } "}"
-        type_define          ::= literal ":" ( type_define_block | type_info )
+        type_define_block    ::= "{" [ lf ] { type_define_element lf_or_comma } "}"
+        type_define_element  ::= [ mutation_policy ] literal ":" ( type_define_block | type_info )
 
         use_declare          ::= "use" "[" [ lf ] { literal lf_or_comma } "]"
 
         host_define          ::= "host" string_literal "{" statements "}"
 
-        let_statement        ::= "let" [ "tunable" ] literal [ ":" type_info ] [ "=" [ lf ] expression ]
+        let_statement        ::= [ "declare" ] "let" [ mutation_policy ] literal [ ":" type_info ] [ "=" [ lf ] expression ]
+
+        mutation_policy      ::= "readonly"
+                                 | "tunable" [ "(" "cost" "=" integer_literal ")" ]
 
         assign_statement     ::= expression "=" expression
 
@@ -77,6 +80,7 @@ mod grammar {
         literal              ::= r"\w+"
 
         numeric_literal      ::= r"[\d_]+(\.[\d_]+)?([eE][+-]?[\d_]+)?"
+        integer_literal      ::= r"[\d_]+"
         
         string_literal       ::= r#""([^"\\]|\\.)*""# | r"'([^'\\]|\\.)*'"
 

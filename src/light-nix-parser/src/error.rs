@@ -25,6 +25,7 @@ pub enum Scope {
     UseDeclare,
     HostDefine,
     LetStatement,
+    MutationPolicy,
     AssignStatement,
     FunctionDefine,
     FunctionArguments,
@@ -53,6 +54,7 @@ pub enum Expected {
     Literal,
     StringLiteral,
     TypeInfo,
+    IntegerLiteral,
     AccessMember,
     Token(TokenKind),
 }
@@ -66,6 +68,7 @@ pub enum ParseErrorKind {
     InvalidTypedef,
     InvalidUseElement,
     InvalidLetStatement,
+    InvalidMutationPolicy,
     InvalidAssignStatement,
     InvalidFunctionDefine,
     InvalidFunctionArgument,
