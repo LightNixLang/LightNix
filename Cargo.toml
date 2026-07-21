@@ -4,5 +4,6 @@ resolver = "2"
 members = [
     "src/light-nix",
     "src/light-nix-parser",
-    "src/light-nix-grammar"
+    "src/light-nix-grammar",
+    "src/light-nix-name-resolver"
 ]

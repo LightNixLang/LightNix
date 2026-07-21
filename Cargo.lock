@@ -111,6 +111,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "light-nix-name-resolver"
+version = "0.1.0"
+dependencies = [
+ "light-nix-parser",
+]
+
+[[package]]
 name = "light-nix-parser"
 version = "0.1.0"
 dependencies = [
