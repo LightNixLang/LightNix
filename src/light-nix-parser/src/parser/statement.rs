@@ -3,10 +3,10 @@ use bumpalo::Bump;
 
 use crate::{
     ast::{
-        AssignStatement, Block, EnumDefine, Expression, FunctionArgument, FunctionArguments,
-        FunctionAttribute, FunctionDefine, ImportStatement, LetStatement, Literal, MutationPolicy,
-        MutationPolicyKind, Source, Spanned, Statement, Statements, StringLiteral, TypeDefine,
-        TypeInfo, Typedef, TypedefBlock, TypedefValue, UseDeclare,
+        AssignStatement, Block, EnumDefine, EnumVariant, Expression, FunctionArgument,
+        FunctionArguments, FunctionAttribute, FunctionDefine, ImportStatement, LetStatement,
+        Literal, MutationPolicy, MutationPolicyKind, Source, Spanned, Statement, Statements,
+        StringLiteral, TypeDefine, TypeInfo, Typedef, TypedefBlock, TypedefValue, UseDeclare,
     },
     error::{Expected, ParseErrorKind, Scope, error_here, recover_until},
     lexer::{Lexer, TokenKind},
@@ -209,12 +209,31 @@ fn parse_enum_define<'input, 'allocator>(
 
     let Some(name) = parse_literal(lexer) else {
         errors.push(error_here(
-            ParseErrorKind::InvalidEnumVariant,
+            ParseErrorKind::InvalidEnumDefine,
             lexer,
             Expected::Literal,
             Scope::EnumDefine,
         ));
         return None;
+    };
+
+    let represented = current_kind(lexer) == TokenKind::Colon;
+    let representation_type = if represented {
+        lexer.next();
+
+        let representation_type = parse_type_info(lexer, errors, allocator);
+        if representation_type.is_none() {
+            errors.push(error_here(
+                ParseErrorKind::InvalidEnumDefine,
+                lexer,
+                Expected::TypeInfo,
+                Scope::EnumDefine,
+            ));
+        }
+
+        representation_type
+    } else {
+        None
     };
 
     if !recover_opening_token(
@@ -236,19 +255,65 @@ fn parse_enum_define<'input, 'allocator>(
         }
         match current_kind(lexer) {
             TokenKind::BraceRight | TokenKind::None => break,
-            TokenKind::Literal => variants.push(parse_literal(lexer).unwrap()),
-            _ => {
+            _ => {}
+        }
+
+        let variant_anchor = lexer.cast_anchor();
+        let Some(name) = parse_literal(lexer) else {
+            let error = recover_until(
+                ParseErrorKind::InvalidEnumVariant,
+                lexer,
+                &[TokenKind::LineFeed, TokenKind::Comma, TokenKind::BraceRight],
+                Expected::EnumVariant,
+                Scope::EnumVariant,
+                allocator,
+            );
+            errors.push(error);
+            if current_kind(lexer) == TokenKind::BraceRight {
+                break;
+            }
+            skip_list_separator(lexer);
+            continue;
+        };
+
+        let value = if represented {
+            if current_kind(lexer) != TokenKind::Equal {
                 let error = recover_until(
                     ParseErrorKind::InvalidEnumVariant,
                     lexer,
                     &[TokenKind::LineFeed, TokenKind::Comma, TokenKind::BraceRight],
-                    Expected::EnumVariant,
-                    Scope::EnumDefine,
+                    Expected::Token(TokenKind::Equal),
+                    Scope::EnumVariant,
                     allocator,
                 );
                 errors.push(error);
+                None
+            } else {
+                lexer.next();
+
+                let value = parse_expression(lexer, errors, allocator);
+                if value.is_none() {
+                    let error = recover_until(
+                        ParseErrorKind::InvalidEnumVariant,
+                        lexer,
+                        &[TokenKind::LineFeed, TokenKind::Comma, TokenKind::BraceRight],
+                        Expected::Expression,
+                        Scope::EnumVariant,
+                        allocator,
+                    );
+                    errors.push(error);
+                }
+                value
             }
-        }
+        } else {
+            None
+        };
+
+        variants.push(EnumVariant {
+            name,
+            value,
+            span: variant_anchor.elapsed(lexer),
+        });
 
         if current_kind(lexer) == TokenKind::BraceRight {
             break;
@@ -259,7 +324,7 @@ fn parse_enum_define<'input, 'allocator>(
                 lexer,
                 &[TokenKind::LineFeed, TokenKind::Comma, TokenKind::BraceRight],
                 Expected::Token(TokenKind::Comma),
-                Scope::EnumDefine,
+                Scope::EnumVariant,
                 allocator,
             );
             errors.push(error);
@@ -279,6 +344,7 @@ fn parse_enum_define<'input, 'allocator>(
     let variants = allocator.alloc_slice_fill_iter(variants);
     Some(allocator.alloc(EnumDefine {
         name,
+        representation_type,
         variants,
         span: anchor.elapsed(lexer),
     }))
@@ -1162,7 +1228,7 @@ mod tests {
     use bumpalo::Bump;
 
     use crate::{
-        ast::{BinaryOperator, Expression, MutationPolicyKind, Statement, TypedefValue},
+        ast::{BinaryOperator, Expression, MutationPolicyKind, Statement, TypedefValue, Value},
         error::ParseErrorKind,
         lexer::Lexer,
         parser::parse_source,
@@ -1280,9 +1346,84 @@ let recovered = true
         let Statement::EnumDefine(profile) = &ast.statements[0] else {
             panic!("expected enum");
         };
+        assert!(profile.representation_type.is_none());
         assert_eq!(profile.variants.len(), 2);
-        assert_eq!(profile.variants[0].value, "Desktop");
-        assert_eq!(profile.variants[1].value, "Laptop");
+        assert_eq!(profile.variants[0].name.value, "Desktop");
+        assert!(profile.variants[0].value.is_none());
+        assert_eq!(profile.variants[1].name.value, "Laptop");
+        assert!(profile.variants[1].value.is_none());
+        assert!(matches!(ast.statements[1], Statement::LetStatement(_)));
+    }
+
+    #[test]
+    fn parses_enum_with_a_representation_type_and_values() {
+        let source = r#"
+enum Desktop: string {
+    KDE = "kde plasma"
+    GNOME = "gnome"
+}
+"#;
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert!(errors.is_empty(), "parse errors: {errors:#?}");
+        assert_eq!(ast.statements.len(), 1);
+
+        let Statement::EnumDefine(desktop) = &ast.statements[0] else {
+            panic!("expected represented enum");
+        };
+        assert_eq!(desktop.representation_type.unwrap().name.value, "string");
+
+        let [kde, gnome] = desktop.variants else {
+            panic!("expected two represented variants");
+        };
+        assert_eq!(kde.name.value, "KDE");
+        let Expression::Primary(kde_value) = kde.value.unwrap() else {
+            panic!("expected KDE primary value");
+        };
+        let Value::String(kde_value) = &kde_value.value else {
+            panic!("expected KDE string value");
+        };
+        assert_eq!(kde_value.value, "\"kde plasma\"");
+
+        assert_eq!(gnome.name.value, "GNOME");
+        let Expression::Primary(gnome_value) = gnome.value.unwrap() else {
+            panic!("expected GNOME primary value");
+        };
+        let Value::String(gnome_value) = &gnome_value.value else {
+            panic!("expected GNOME string value");
+        };
+        assert_eq!(gnome_value.value, "\"gnome\"");
+    }
+
+    #[test]
+    fn represented_enum_recovers_from_a_missing_variant_value_separator() {
+        let source = r#"
+enum Desktop: string {
+    KDE "kde plasma"
+    GNOME = "gnome"
+}
+let recovered = true
+"#;
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert_eq!(errors.len(), 1, "parse errors: {errors:#?}");
+        assert_eq!(errors[0].kind, ParseErrorKind::InvalidEnumVariant);
+        assert_eq!(ast.statements.len(), 2);
+
+        let Statement::EnumDefine(desktop) = &ast.statements[0] else {
+            panic!("expected recovered enum");
+        };
+        assert_eq!(desktop.variants.len(), 2);
+        assert!(desktop.variants[0].value.is_none());
+        assert!(desktop.variants[1].value.is_some());
         assert!(matches!(ast.statements[1], Statement::LetStatement(_)));
     }
 

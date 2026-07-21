@@ -113,11 +113,21 @@ impl_ast!(impl<'input> for ImportStatement<'input>);
 #[derive(Debug)]
 pub struct EnumDefine<'input, 'allocator> {
     pub name: Literal<'input>,
-    pub variants: &'allocator [Literal<'input>],
+    pub representation_type: Option<&'allocator TypeInfo<'input, 'allocator>>,
+    pub variants: &'allocator [EnumVariant<'input, 'allocator>],
     pub span: Range<usize>,
 }
 
 impl_ast!(impl<'input, 'allocator> for EnumDefine<'input, 'allocator>);
+
+#[derive(Debug)]
+pub struct EnumVariant<'input, 'allocator> {
+    pub name: Literal<'input>,
+    pub value: Option<&'allocator Expression<'input, 'allocator>>,
+    pub span: Range<usize>,
+}
+
+impl_ast!(impl<'input, 'allocator> for EnumVariant<'input, 'allocator>);
 
 #[derive(Debug)]
 pub struct TypeDefine<'input, 'allocator> {

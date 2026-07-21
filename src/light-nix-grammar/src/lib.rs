@@ -21,7 +21,10 @@ mod grammar {
 
         import_statement     ::= "import" string_literal
 
-        enum_define          ::= "enum" literal "{" [ lf ] { literal lf_or_comma } "}"
+        enum_define          ::= "enum" literal ( enum_symbolic_body | ":" type_info enum_repr_body )
+        enum_symbolic_body   ::= "{" [ lf ] { literal lf_or_comma } "}"
+        enum_repr_body       ::= "{" [ lf ] { enum_repr_variant lf_or_comma } "}"
+        enum_repr_variant    ::= literal "=" expression
 
         type_define          ::= "type" literal type_define_block
         type_define_block    ::= "{" [ lf ] { type_define_element lf_or_comma } "}"
