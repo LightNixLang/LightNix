@@ -4,9 +4,10 @@ use bumpalo::Bump;
 use crate::{
     ast::{
         AssignStatement, Block, EnumDefine, Expression, FunctionArgument, FunctionArguments,
-        FunctionAttribute, FunctionDefine, HostDefine, Inputs, InputsElement, LetStatement,
-        Literal, MutationPolicy, MutationPolicyKind, Source, Spanned, Statement, Statements,
-        StringLiteral, TypeDefine, TypeInfo, Typedef, TypedefBlock, TypedefValue, UseDeclare,
+        FunctionAttribute, FunctionDefine, HostDefine, ImportStatement, Inputs, InputsElement,
+        LetStatement, Literal, MutationPolicy, MutationPolicyKind, Source, Spanned, Statement,
+        Statements, StringLiteral, TypeDefine, TypeInfo, Typedef, TypedefBlock, TypedefValue,
+        UseDeclare,
     },
     error::{Expected, ParseErrorKind, Scope, error_here, recover_until},
     lexer::{Lexer, TokenKind},
@@ -43,9 +44,30 @@ fn parse_statements<'input, 'allocator>(
             break;
         }
 
+        let error_count = errors.len();
         let statement = match parse_statement(lexer, errors, allocator) {
             Some(statement) => statement,
             None => {
+                let kind = current_kind(lexer);
+                if errors.len() > error_count
+                    && matches!(
+                        kind,
+                        TokenKind::LineFeed
+                            | TokenKind::Semicolon
+                            | TokenKind::BraceRight
+                            | TokenKind::None
+                    )
+                {
+                    if stop_at_brace && kind == TokenKind::BraceRight {
+                        break;
+                    }
+                    if !stop_at_brace && kind == TokenKind::BraceRight {
+                        lexer.next();
+                    }
+                    skip_statement_separator(lexer);
+                    continue;
+                }
+
                 let error = recover_until(
                     ParseErrorKind::InvalidStatement,
                     lexer,
@@ -121,6 +143,9 @@ fn parse_statement<'input, 'allocator>(
 ) -> Option<Statement<'input, 'allocator>> {
     match current_kind(lexer) {
         TokenKind::Inputs => parse_inputs(lexer, errors, allocator).map(Statement::Inputs),
+        TokenKind::Import => {
+            parse_import_statement(lexer, errors, allocator).map(Statement::ImportStatement)
+        }
         TokenKind::Enum => parse_enum_define(lexer, errors, allocator).map(Statement::EnumDefine),
         TokenKind::Type => parse_type_define(lexer, errors, allocator).map(Statement::TypeDefine),
         TokenKind::Use => parse_use_declare(lexer, errors, allocator).map(Statement::UseDeclare),
@@ -133,6 +158,44 @@ fn parse_statement<'input, 'allocator>(
         }
         _ => parse_assign_or_expression_statement(lexer, errors, allocator),
     }
+}
+
+fn parse_import_statement<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut ParseErrors<'input, 'allocator>,
+    allocator: &'allocator Bump,
+) -> Option<&'allocator ImportStatement<'input>> {
+    if current_kind(lexer) != TokenKind::Import {
+        return None;
+    }
+
+    let anchor = lexer.cast_anchor();
+    lexer.next();
+
+    if current_kind(lexer) != TokenKind::StringLiteral {
+        let error = recover_until(
+            ParseErrorKind::InvalidImportStatement,
+            lexer,
+            &[
+                TokenKind::LineFeed,
+                TokenKind::Semicolon,
+                TokenKind::BraceRight,
+            ],
+            Expected::StringLiteral,
+            Scope::ImportStatement,
+            allocator,
+        );
+        errors.push(error);
+        return None;
+    }
+
+    let path_token = lexer.next().unwrap();
+    let path = StringLiteral::new(path_token.text, path_token.span);
+
+    Some(allocator.alloc(ImportStatement {
+        path,
+        span: anchor.elapsed(lexer),
+    }))
 }
 
 fn parse_inputs<'input, 'allocator>(
@@ -1529,6 +1592,55 @@ let recovered
         assert!(broken.type_info.is_none());
         assert!(broken.value.is_some());
         assert!(matches!(ast.statements[1], Statement::LetStatement(_)));
+    }
+
+    #[test]
+    fn parses_import_statements_with_zero_copy_paths() {
+        let source = r#"
+import "./modules/programs.lnix"
+import 'catalog/firefox.lnix';
+let recovered = true
+"#;
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert!(errors.is_empty(), "parse errors: {errors:#?}");
+        assert_eq!(ast.statements.len(), 3);
+
+        let Statement::ImportStatement(first) = &ast.statements[0] else {
+            panic!("expected first import statement");
+        };
+        assert_eq!(first.path.value, r#""./modules/programs.lnix""#);
+        assert_eq!(&source[first.path.span()], first.path.value);
+
+        let Statement::ImportStatement(second) = &ast.statements[1] else {
+            panic!("expected second import statement");
+        };
+        assert_eq!(second.path.value, "'catalog/firefox.lnix'");
+        assert_eq!(&source[second.path.span()], second.path.value);
+        assert!(matches!(ast.statements[2], Statement::LetStatement(_)));
+    }
+
+    #[test]
+    fn invalid_import_path_recovers_to_the_following_statement() {
+        let source = r#"
+import nixpkgs
+let recovered = true
+"#;
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert_eq!(errors.len(), 1, "parse errors: {errors:#?}");
+        assert_eq!(errors[0].kind, ParseErrorKind::InvalidImportStatement);
+        assert_eq!(errors[0].scope, crate::error::Scope::ImportStatement);
+        assert_eq!(ast.statements.len(), 1);
+        assert!(matches!(ast.statements[0], Statement::LetStatement(_)));
     }
 
     #[test]

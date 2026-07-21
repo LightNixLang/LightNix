@@ -7,6 +7,8 @@ use regex::Regex;
 pub enum TokenKind {
     /// inputs
     Inputs,
+    /// import
+    Import,
     /// enum
     Enum,
     /// type
@@ -116,6 +118,7 @@ pub enum TokenKind {
 static TOKENIZERS: &[Tokenizer] = &[
     // Keywords
     Tokenizer::Keyword(TokenKind::Inputs, "inputs"),
+    Tokenizer::Keyword(TokenKind::Import, "import"),
     Tokenizer::Keyword(TokenKind::Enum, "enum"),
     Tokenizer::Keyword(TokenKind::Type, "type"),
     Tokenizer::Keyword(TokenKind::Use, "use"),

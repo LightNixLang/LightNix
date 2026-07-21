@@ -5,13 +5,14 @@ mod grammar {
     // This is an LR(1) parser generator, used for maintain quality.
     // If the specified grammar is ambiguous, compilation is aborted with conflict.
     // Usage : https://github.com/bea4dev/bnf_rules
-    bnf_rules!{
+    bnf_rules! {
         #[generate_code = false]
 
         source               ::= statements
 
         statements           ::= [ lf_or_semicolons ] { statement lf_or_semicolons }
         statement            ::= inputs
+                                 | import_statement
                                  | enum_define
                                  | type_define
                                  | use_declare
@@ -22,6 +23,8 @@ mod grammar {
 
         inputs               ::= "inputs" "{" [ lf_or_semicolons ] { inputs_element lf_or_semicolons } "}"
         inputs_element       ::= literal "=" string_literal
+
+        import_statement     ::= "import" string_literal
 
         enum_define          ::= "enum" literal "{" [ lf ] { literal lf_or_comma } "}"
 
@@ -45,7 +48,7 @@ mod grammar {
         function_arguments   ::= "(" [ lf ] { function_argument [ lf_or_comma ] } ")"
         function_argument    ::= literal ":" type_info
         function_return_type ::= "->" type_info
-    
+
         block                ::= "{" statements "}"
 
         expression           ::= or_expr | if_expression | return_expression
@@ -81,7 +84,7 @@ mod grammar {
 
         numeric_literal      ::= r"[\d_]+(\.[\d_]+)?([eE][+-]?[\d_]+)?"
         integer_literal      ::= r"[\d_]+"
-        
+
         string_literal       ::= r#""([^"\\]|\\.)*""# | r"'([^'\\]|\\.)*'"
 
         lf_or_comma          ::= lf | ","

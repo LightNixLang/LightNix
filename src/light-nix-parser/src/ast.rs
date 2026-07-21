@@ -78,6 +78,7 @@ impl_ast!(impl<'input, 'allocator> for Statements<'input, 'allocator>);
 #[derive(Debug)]
 pub enum Statement<'input, 'allocator> {
     Inputs(&'allocator Inputs<'input, 'allocator>),
+    ImportStatement(&'allocator ImportStatement<'input>),
     EnumDefine(&'allocator EnumDefine<'input, 'allocator>),
     TypeDefine(&'allocator TypeDefine<'input, 'allocator>),
     UseDeclare(&'allocator UseDeclare<'input, 'allocator>),
@@ -92,6 +93,7 @@ impl AST for Statement<'_, '_> {
     fn span(&self) -> Range<usize> {
         match self {
             Self::Inputs(node) => node.span(),
+            Self::ImportStatement(node) => node.span(),
             Self::EnumDefine(node) => node.span(),
             Self::TypeDefine(node) => node.span(),
             Self::UseDeclare(node) => node.span(),
@@ -120,6 +122,14 @@ pub struct InputsElement<'input> {
 }
 
 impl_ast!(impl<'input> for InputsElement<'input>);
+
+#[derive(Debug)]
+pub struct ImportStatement<'input> {
+    pub path: StringLiteral<'input>,
+    pub span: Range<usize>,
+}
+
+impl_ast!(impl<'input> for ImportStatement<'input>);
 
 #[derive(Debug)]
 pub struct EnumDefine<'input, 'allocator> {
