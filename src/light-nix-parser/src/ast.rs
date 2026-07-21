@@ -82,6 +82,7 @@ pub enum Statement<'input, 'allocator> {
     TypeDefine(&'allocator TypeDefine<'input, 'allocator>),
     UseDeclare(&'allocator UseDeclare<'input, 'allocator>),
     LetStatement(&'allocator LetStatement<'input, 'allocator>),
+    AssertStatement(&'allocator AssertStatement<'input, 'allocator>),
     AssignStatement(&'allocator AssignStatement<'input, 'allocator>),
     FunctionDefine(&'allocator FunctionDefine<'input, 'allocator>),
     Expression(&'allocator Expression<'input, 'allocator>),
@@ -95,6 +96,7 @@ impl AST for Statement<'_, '_> {
             Self::TypeDefine(node) => node.span(),
             Self::UseDeclare(node) => node.span(),
             Self::LetStatement(node) => node.span(),
+            Self::AssertStatement(node) => node.span(),
             Self::AssignStatement(node) => node.span(),
             Self::FunctionDefine(node) => node.span(),
             Self::Expression(node) => node.span(),
@@ -211,6 +213,15 @@ pub struct LetStatement<'input, 'allocator> {
 
 impl_ast!(impl<'input, 'allocator> for LetStatement<'input, 'allocator>);
 
+#[derive(Debug)]
+pub struct AssertStatement<'input, 'allocator> {
+    pub condition: &'allocator Expression<'input, 'allocator>,
+    pub message: Option<&'allocator Expression<'input, 'allocator>>,
+    pub span: Range<usize>,
+}
+
+impl_ast!(impl<'input, 'allocator> for AssertStatement<'input, 'allocator>);
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MutationPolicy {
     pub kind: MutationPolicyKind,
@@ -288,6 +299,7 @@ pub enum Expression<'input, 'allocator> {
     If(&'allocator IfExpression<'input, 'allocator>),
     Match(&'allocator MatchExpression<'input, 'allocator>),
     Return(&'allocator ReturnExpression<'input, 'allocator>),
+    Throw(&'allocator ThrowExpression<'input, 'allocator>),
     Elvis(&'allocator ElvisExpression<'input, 'allocator>),
     Binary(&'allocator BinaryExpression<'input, 'allocator>),
     Unary(&'allocator UnaryExpression<'input, 'allocator>),
@@ -300,6 +312,7 @@ impl AST for Expression<'_, '_> {
             Self::If(node) => node.span(),
             Self::Match(node) => node.span(),
             Self::Return(node) => node.span(),
+            Self::Throw(node) => node.span(),
             Self::Elvis(node) => node.span(),
             Self::Binary(node) => node.span(),
             Self::Unary(node) => node.span(),
@@ -413,6 +426,14 @@ pub struct ReturnExpression<'input, 'allocator> {
 }
 
 impl_ast!(impl<'input, 'allocator> for ReturnExpression<'input, 'allocator>);
+
+#[derive(Debug)]
+pub struct ThrowExpression<'input, 'allocator> {
+    pub message: Option<&'allocator Expression<'input, 'allocator>>,
+    pub span: Range<usize>,
+}
+
+impl_ast!(impl<'input, 'allocator> for ThrowExpression<'input, 'allocator>);
 
 #[derive(Debug)]
 pub struct ElvisExpression<'input, 'allocator> {

@@ -3,11 +3,11 @@ use bumpalo::Bump;
 
 use crate::{
     ast::{
-        AssignStatement, Block, EnumDefine, EnumVariant, Expression, FunctionArgument,
-        FunctionArguments, FunctionAttribute, FunctionDefine, ImportElement, ImportKind,
-        ImportStatement, LetStatement, Literal, MutationPolicy, MutationPolicyKind, Source,
-        Spanned, Statement, Statements, StringLiteral, TypeDefine, TypeInfo, Typedef, TypedefBlock,
-        TypedefValue, UseDeclare,
+        AssertStatement, AssignStatement, Block, EnumDefine, EnumVariant, Expression,
+        FunctionArgument, FunctionArguments, FunctionAttribute, FunctionDefine, ImportElement,
+        ImportKind, ImportStatement, LetStatement, Literal, MutationPolicy, MutationPolicyKind,
+        Source, Spanned, Statement, Statements, StringLiteral, TypeDefine, TypeInfo, Typedef,
+        TypedefBlock, TypedefValue, UseDeclare,
     },
     error::{Expected, ParseErrorKind, Scope, error_here, recover_until},
     lexer::{Lexer, TokenKind},
@@ -151,6 +151,9 @@ fn parse_statement<'input, 'allocator>(
         TokenKind::Use => parse_use_declare(lexer, errors, allocator).map(Statement::UseDeclare),
         TokenKind::Let | TokenKind::Declare => {
             parse_let_statement(lexer, errors, allocator).map(Statement::LetStatement)
+        }
+        TokenKind::Assert => {
+            parse_assert_statement(lexer, errors, allocator).map(Statement::AssertStatement)
         }
         TokenKind::Inline | TokenKind::Opaque => {
             parse_function_define(lexer, errors, allocator).map(Statement::FunctionDefine)
@@ -913,7 +916,7 @@ fn parse_assign_or_expression_statement<'input, 'allocator>(
     if current_kind(lexer) != TokenKind::Equal {
         if matches!(
             target,
-            Expression::If(_) | Expression::Match(_) | Expression::Return(_)
+            Expression::If(_) | Expression::Match(_) | Expression::Return(_) | Expression::Throw(_)
         ) {
             return Some(Statement::Expression(target));
         }
@@ -938,6 +941,87 @@ fn parse_assign_or_expression_statement<'input, 'allocator>(
         span: anchor.elapsed(lexer),
     });
     Some(Statement::AssignStatement(assignment))
+}
+
+fn parse_assert_statement<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut ParseErrors<'input, 'allocator>,
+    allocator: &'allocator Bump,
+) -> Option<&'allocator AssertStatement<'input, 'allocator>> {
+    if current_kind(lexer) != TokenKind::Assert {
+        return None;
+    }
+
+    let anchor = lexer.cast_anchor();
+    lexer.next();
+
+    let Some(condition) = parse_expression(lexer, errors, allocator) else {
+        let error = recover_until(
+            ParseErrorKind::InvalidAssertStatement,
+            lexer,
+            &[
+                TokenKind::LineFeed,
+                TokenKind::Semicolon,
+                TokenKind::BraceRight,
+            ],
+            Expected::Expression,
+            Scope::AssertStatement,
+            allocator,
+        );
+        errors.push(error);
+        return None;
+    };
+
+    if current_kind(lexer) != TokenKind::Comma {
+        let error = recover_until(
+            ParseErrorKind::InvalidAssertStatement,
+            lexer,
+            &[
+                TokenKind::Comma,
+                TokenKind::LineFeed,
+                TokenKind::Semicolon,
+                TokenKind::BraceRight,
+            ],
+            Expected::Token(TokenKind::Comma),
+            Scope::AssertStatement,
+            allocator,
+        );
+        errors.push(error);
+    }
+
+    if current_kind(lexer) != TokenKind::Comma {
+        return Some(allocator.alloc(AssertStatement {
+            condition,
+            message: None,
+            span: anchor.elapsed(lexer),
+        }));
+    }
+    lexer.next();
+
+    let message_anchor = lexer.cast_anchor();
+    let message_follows_separator = matches!(
+        current_kind(lexer),
+        TokenKind::LineFeed | TokenKind::Document
+    );
+    skip_line_feed(lexer);
+    let message = parse_expression(lexer, errors, allocator);
+    if message.is_none() {
+        if message_follows_separator && is_statement_start(current_kind(lexer)) {
+            lexer.back_to_anchor(message_anchor);
+        }
+        errors.push(error_here(
+            ParseErrorKind::InvalidAssertStatement,
+            lexer,
+            Expected::Expression,
+            Scope::AssertStatement,
+        ));
+    }
+
+    Some(allocator.alloc(AssertStatement {
+        condition,
+        message,
+        span: anchor.elapsed(lexer),
+    }))
 }
 
 fn parse_function_define<'input, 'allocator>(
@@ -2115,6 +2199,127 @@ let local_value = false
             panic!("expected local binding");
         };
         assert!(!local_value.exported);
+    }
+
+    #[test]
+    fn parses_throw_expressions_and_assert_statements() {
+        let source = r#"
+let required = optional ?: throw "value is required"
+let selected = match optional {
+    null => throw "missing value",
+    some(value) => value
+}
+assert required != "", "required must not be empty"
+assert true,
+    "multiline message"
+throw "top-level failure: " + required
+"#;
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert!(errors.is_empty(), "parse errors: {errors:#?}");
+        assert_eq!(ast.statements.len(), 5);
+
+        let Statement::LetStatement(required) = &ast.statements[0] else {
+            panic!("expected required binding");
+        };
+        let Expression::Elvis(required) = required.value.unwrap() else {
+            panic!("expected Elvis expression");
+        };
+        let Expression::Throw(missing_required) = required.fallback else {
+            panic!("expected throw fallback");
+        };
+        assert!(missing_required.message.is_some());
+
+        let Statement::LetStatement(selected) = &ast.statements[1] else {
+            panic!("expected selected binding");
+        };
+        let Expression::Match(selected) = selected.value.unwrap() else {
+            panic!("expected match expression");
+        };
+        assert!(matches!(selected.arms[0].value, Expression::Throw(_)));
+
+        let Statement::AssertStatement(non_empty) = &ast.statements[2] else {
+            panic!("expected assertion");
+        };
+        assert!(matches!(non_empty.condition, Expression::Binary(_)));
+        assert!(non_empty.message.is_some());
+
+        let Statement::AssertStatement(multiline) = &ast.statements[3] else {
+            panic!("expected multiline assertion");
+        };
+        assert!(multiline.message.is_some());
+
+        let Statement::Expression(Expression::Throw(top_level)) = &ast.statements[4] else {
+            panic!("expected top-level throw expression");
+        };
+        assert!(matches!(top_level.message, Some(Expression::Binary(_))));
+    }
+
+    #[test]
+    fn malformed_throw_and_assert_recover_to_following_statements() {
+        let source = r#"
+let broken = throw
+let recovered = true
+assert recovered
+let after_missing_comma = false
+assert recovered,
+let after_missing_message = true
+throw
+let after_throw = false
+"#;
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert_eq!(errors.len(), 4, "parse errors: {errors:#?}");
+        assert_eq!(
+            errors
+                .iter()
+                .filter(|error| error.kind == ParseErrorKind::InvalidThrowExpression)
+                .count(),
+            2
+        );
+        assert_eq!(
+            errors
+                .iter()
+                .filter(|error| error.kind == ParseErrorKind::InvalidAssertStatement)
+                .count(),
+            2
+        );
+        assert_eq!(ast.statements.len(), 8);
+
+        let Statement::LetStatement(broken) = &ast.statements[0] else {
+            panic!("expected broken binding");
+        };
+        let Expression::Throw(broken_throw) = broken.value.unwrap() else {
+            panic!("expected recovered throw expression");
+        };
+        assert!(broken_throw.message.is_none());
+        assert!(matches!(ast.statements[1], Statement::LetStatement(_)));
+
+        let Statement::AssertStatement(missing_comma) = &ast.statements[2] else {
+            panic!("expected assertion recovered from a missing comma");
+        };
+        assert!(missing_comma.message.is_none());
+        assert!(matches!(ast.statements[3], Statement::LetStatement(_)));
+
+        let Statement::AssertStatement(missing_message) = &ast.statements[4] else {
+            panic!("expected assertion recovered from a missing message");
+        };
+        assert!(missing_message.message.is_none());
+        assert!(matches!(ast.statements[5], Statement::LetStatement(_)));
+
+        assert!(matches!(
+            ast.statements[6],
+            Statement::Expression(Expression::Throw(_))
+        ));
+        assert!(matches!(ast.statements[7], Statement::LetStatement(_)));
     }
 
     #[test]

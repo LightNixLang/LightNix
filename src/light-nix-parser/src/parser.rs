@@ -29,12 +29,14 @@ pub(crate) fn is_statement_start(kind: TokenKind) -> bool {
             | TokenKind::Type
             | TokenKind::Use
             | TokenKind::Let
+            | TokenKind::Assert
             | TokenKind::Declare
             | TokenKind::Inline
             | TokenKind::Opaque
             | TokenKind::If
             | TokenKind::Match
             | TokenKind::Return
+            | TokenKind::Throw
     )
 }
 

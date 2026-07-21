@@ -29,6 +29,8 @@ pub enum TokenKind {
     Cost,
     /// let
     Let,
+    /// assert
+    Assert,
     /// function
     Function,
     /// inline
@@ -41,6 +43,8 @@ pub enum TokenKind {
     Else,
     /// return
     Return,
+    /// throw
+    Throw,
     /// match
     Match,
     /// some
@@ -143,12 +147,14 @@ static TOKENIZERS: &[Tokenizer] = &[
     Tokenizer::Keyword(TokenKind::Declare, "declare"),
     Tokenizer::Keyword(TokenKind::Cost, "cost"),
     Tokenizer::Keyword(TokenKind::Let, "let"),
+    Tokenizer::Keyword(TokenKind::Assert, "assert"),
     Tokenizer::Keyword(TokenKind::Function, "function"),
     Tokenizer::Keyword(TokenKind::Inline, "inline"),
     Tokenizer::Keyword(TokenKind::Opaque, "opaque"),
     Tokenizer::Keyword(TokenKind::If, "if"),
     Tokenizer::Keyword(TokenKind::Else, "else"),
     Tokenizer::Keyword(TokenKind::Return, "return"),
+    Tokenizer::Keyword(TokenKind::Throw, "throw"),
     Tokenizer::Keyword(TokenKind::Match, "match"),
     Tokenizer::Keyword(TokenKind::Some, "some"),
     Tokenizer::Keyword(TokenKind::Or, "or"),
@@ -529,6 +535,25 @@ if profile == Profile::Desktop {
                 TokenKind::Declare,
                 TokenKind::Let,
                 TokenKind::Literal,
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenizes_throw_and_assert_syntax() {
+        let kinds = Lexer::new(r#"assert enabled, "must be enabled" throw "invalid""#)
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            kinds,
+            [
+                TokenKind::Assert,
+                TokenKind::Literal,
+                TokenKind::Comma,
+                TokenKind::StringLiteral,
+                TokenKind::Throw,
+                TokenKind::StringLiteral,
             ]
         );
     }

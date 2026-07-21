@@ -6,8 +6,8 @@ use crate::{
         AST, AccessOperator, Array, BinaryExpression, BinaryOperator, ElseBranch, ElseBranchValue,
         ElvisExpression, EnumVariantPattern, Expression, FunctionCall, IfBranch, IfExpression,
         Literal, LiteralValue, MatchArm, MatchExpression, Pattern, Primary, PrimaryAccess,
-        ReturnExpression, SomePattern, SomeValue, Spanned, StringLiteral, UnaryExpression,
-        UnaryOperator, Value,
+        ReturnExpression, SomePattern, SomeValue, Spanned, StringLiteral, ThrowExpression,
+        UnaryExpression, UnaryOperator, Value,
     },
     error::{Expected, ParseErrorKind, Scope, error_here, recover_until},
     lexer::{Lexer, TokenKind},
@@ -27,6 +27,8 @@ pub(super) fn parse_expression<'input, 'allocator>(
             .map(|expression| allocator.alloc(Expression::Match(expression)) as &_),
         TokenKind::Return => parse_return_expression(lexer, errors, allocator)
             .map(|expression| allocator.alloc(Expression::Return(expression)) as &_),
+        TokenKind::Throw => parse_throw_expression(lexer, errors, allocator)
+            .map(|expression| allocator.alloc(Expression::Throw(expression)) as &_),
         _ => parse_elvis_expression(lexer, errors, allocator),
     }
 }
@@ -925,6 +927,34 @@ fn parse_return_expression<'input, 'allocator>(
 
     Some(allocator.alloc(ReturnExpression {
         value,
+        span: anchor.elapsed(lexer),
+    }))
+}
+
+fn parse_throw_expression<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut ParseErrors<'input, 'allocator>,
+    allocator: &'allocator Bump,
+) -> Option<&'allocator ThrowExpression<'input, 'allocator>> {
+    if current_kind(lexer) != TokenKind::Throw {
+        return None;
+    }
+
+    let anchor = lexer.cast_anchor();
+    lexer.next();
+
+    let message = parse_expression(lexer, errors, allocator);
+    if message.is_none() {
+        errors.push(error_here(
+            ParseErrorKind::InvalidThrowExpression,
+            lexer,
+            Expected::Expression,
+            Scope::ThrowExpression,
+        ));
+    }
+
+    Some(allocator.alloc(ThrowExpression {
+        message,
         span: anchor.elapsed(lexer),
     }))
 }

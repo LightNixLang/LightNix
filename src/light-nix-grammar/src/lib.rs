@@ -16,8 +16,15 @@ mod grammar {
                                  | type_define
                                  | use_declare
                                  | let_statement
+                                 | assert_statement
                                  | assign_statement
                                  | function_define
+                                 | expression_statement
+
+        expression_statement ::= if_expression
+                                 | match_expression
+                                 | return_expression
+                                 | throw_expression
 
         import_statement     ::= "import" ( string_literal
                                             | import_names "from" string_literal
@@ -38,6 +45,8 @@ mod grammar {
 
         let_statement        ::= [ "export" ] [ "declare" ] "let" [ mutation_policy ] literal [ ":" type_info ] [ "=" [ lf ] expression ]
 
+        assert_statement     ::= "assert" expression "," [ lf ] expression
+
         mutation_policy      ::= "readonly"
                                  | "tunable" [ "(" "cost" "=" integer_literal ")" ]
 
@@ -51,7 +60,11 @@ mod grammar {
 
         block                ::= "{" statements "}"
 
-        expression           ::= elvis_expr | if_expression | match_expression | return_expression
+        expression           ::= elvis_expr
+                                 | if_expression
+                                 | match_expression
+                                 | return_expression
+                                 | throw_expression
 
         elvis_expr           ::= or_expr [ "?:" expression ]
 
@@ -66,6 +79,7 @@ mod grammar {
                                  | literal [ "::" literal ]
 
         return_expression    ::= "return" [ expression ]
+        throw_expression     ::= "throw" expression
 
         or_expr              ::= and_expr { "or" and_expr }
         and_expr             ::= equ_or_ine_expr { "and" equ_or_ine_expr }
