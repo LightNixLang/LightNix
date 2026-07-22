@@ -10,8 +10,8 @@ use light_nix_name_resolver::{
 use light_nix_parser::ast::{
     AST, AccessOperator, Array, BinaryOperator, ElseBranchValue, ExplicitTypeArgument,
     ExplicitTypeArguments, Expression, FunctionCall, FunctionDefine, GenericParameters,
-    ImplementsDefine, InterfaceDefine, LetStatement, Pattern, Primary, Source, Statement,
-    Statements, TypeDefine, TypeInfo, TypedefBlock, TypedefValue, UnaryOperator, Value,
+    ImplementsDefine, InterfaceDefine, LetStatement, Pattern, Primary, PrimaryAccess, Source,
+    Statement, Statements, TypeDefine, TypeInfo, TypedefBlock, TypedefValue, UnaryOperator, Value,
     WhereClause,
 };
 
@@ -110,6 +110,7 @@ impl TypeEnvironment {
 pub struct TypeCheckResult<'ast> {
     expression_types: HashMap<AstId<'ast>, Type>,
     type_info_types: HashMap<AstId<'ast>, Type>,
+    member_resolutions: HashMap<AstId<'ast>, MemberResolution>,
     symbol_types: HashMap<SymbolId, TypeScheme>,
     field_types: HashMap<FieldId, Type>,
     field_lookup: HashMap<(TypeDefId, String), FieldId>,
@@ -145,6 +146,14 @@ impl<'ast> TypeCheckResult<'ast> {
     ) -> Option<&Type> {
         self.type_info_types
             .get(&AstId::new(type_info, AstKind::TypeInfo))
+    }
+
+    pub fn member_resolution<'input, 'allocator>(
+        &self,
+        access: &'ast PrimaryAccess<'input, 'allocator>,
+    ) -> Option<&MemberResolution> {
+        self.member_resolutions
+            .get(&AstId::new(&access.member, AstKind::Literal))
     }
 
     pub fn symbol_type(&self, symbol: SymbolId) -> Option<&TypeScheme> {
@@ -184,12 +193,14 @@ pub struct ImplementationScheme {
     pub interface: Type,
     pub target: Type,
     pub bounds: Vec<InterfaceBound>,
+    pub methods: HashMap<String, SymbolId>,
     pub span: Range<usize>,
 }
 
 #[derive(Debug, Clone)]
 pub struct InterfaceMethodScheme {
     pub owner: TypeDefId,
+    pub symbol: SymbolId,
     pub name: String,
     pub interface: Type,
     pub receiver: Option<Type>,
@@ -197,10 +208,30 @@ pub struct InterfaceMethodScheme {
     pub explicit_parameters: Vec<GenericParameterId>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberResolution {
+    Field(FieldId),
+    Builtin(BuiltinMethod),
+    InterfaceMethod {
+        interface: TypeDefId,
+        declaration: SymbolId,
+        implementation: Option<SymbolId>,
+    },
+}
+
 #[derive(Debug, Clone)]
-struct Obligation {
+struct DispatchOrigin<'ast> {
+    member: AstId<'ast>,
+    interface: TypeDefId,
+    declaration: SymbolId,
+    method: String,
+}
+
+#[derive(Debug, Clone)]
+struct Obligation<'ast> {
     bound: InterfaceBound,
     assumptions: Vec<InterfaceBound>,
+    dispatch: Option<DispatchOrigin<'ast>>,
     span: Range<usize>,
 }
 
@@ -225,6 +256,7 @@ struct Checker<'ast, 'input, 'allocator, 'environment> {
     unifier: Unifier,
     expression_types: HashMap<AstId<'ast>, Type>,
     type_info_types: HashMap<AstId<'ast>, Type>,
+    member_resolutions: HashMap<AstId<'ast>, MemberResolution>,
     symbol_types: HashMap<SymbolId, TypeScheme>,
     field_types: HashMap<FieldId, Type>,
     field_lookup: HashMap<(TypeDefId, String), FieldId>,
@@ -234,7 +266,7 @@ struct Checker<'ast, 'input, 'allocator, 'environment> {
     interface_types: HashSet<TypeDefId>,
     implementations: Vec<ImplementationScheme>,
     interface_methods: Vec<InterfaceMethodScheme>,
-    obligations: VecDeque<Obligation>,
+    obligations: VecDeque<Obligation<'ast>>,
     capabilities: Vec<Capability>,
     assumptions: Vec<InterfaceBound>,
     current_return: Option<Type>,
@@ -272,6 +304,7 @@ impl<'ast, 'input, 'allocator, 'environment> Checker<'ast, 'input, 'allocator, '
             unifier: Unifier::default(),
             expression_types: HashMap::new(),
             type_info_types: HashMap::new(),
+            member_resolutions: HashMap::new(),
             symbol_types,
             field_types,
             field_lookup: environment.field_lookup.clone(),
@@ -340,6 +373,7 @@ impl<'ast, 'input, 'allocator, 'environment> Checker<'ast, 'input, 'allocator, '
         TypeCheckResult {
             expression_types: self.expression_types,
             type_info_types: self.type_info_types,
+            member_resolutions: self.member_resolutions,
             symbol_types: self.symbol_types,
             field_types: self.field_types,
             field_lookup: self.field_lookup,
@@ -493,6 +527,9 @@ impl<'ast, 'input, 'allocator, 'environment> Checker<'ast, 'input, 'allocator, '
         let old_assumptions = self.assumptions.clone();
         self.assumptions.extend(outer_bounds.clone());
         for method in node.methods {
+            let Some(symbol) = self.symbol_declaration(&method.name) else {
+                continue;
+            };
             let receiver = method
                 .arguments
                 .receiver
@@ -515,6 +552,7 @@ impl<'ast, 'input, 'allocator, 'environment> Checker<'ast, 'input, 'allocator, '
             scheme.bounds.extend(outer_bounds.clone());
             self.interface_methods.push(InterfaceMethodScheme {
                 owner,
+                symbol,
                 name: method.name.value.to_owned(),
                 interface: interface.clone(),
                 receiver,
@@ -542,6 +580,14 @@ impl<'ast, 'input, 'allocator, 'environment> Checker<'ast, 'input, 'allocator, '
         self.assumptions.extend(bounds.clone());
         let interface = self.lower_type_info(node.interface);
         let target = self.lower_type_info(node.target);
+        let methods = node
+            .methods
+            .iter()
+            .filter_map(|method| {
+                self.symbol_declaration(&method.name)
+                    .map(|symbol| (method.name.value.to_owned(), symbol))
+            })
+            .collect();
         if !self.is_interface_type(&interface) && !interface.is_error() {
             self.error(
                 TypeCheckErrorKind::ExpectedInterface {
@@ -555,6 +601,7 @@ impl<'ast, 'input, 'allocator, 'environment> Checker<'ast, 'input, 'allocator, '
             interface,
             target,
             bounds,
+            methods,
             span: node.span.clone(),
         });
         self.check_implementation_methods(node);
@@ -1302,6 +1349,10 @@ impl<'ast, 'input, 'allocator, 'environment> Checker<'ast, 'input, 'allocator, '
                 .get(&(*owner, access.member.value.to_owned()))
                 .copied()
         {
+            self.member_resolutions.insert(
+                AstId::new(&access.member, AstKind::Literal),
+                MemberResolution::Field(field_id),
+            );
             let field_type = self
                 .field_types
                 .get(&field_id)
@@ -1349,16 +1400,32 @@ impl<'ast, 'input, 'allocator, 'environment> Checker<'ast, 'input, 'allocator, '
                 self.obligations.push_back(Obligation {
                     bound,
                     assumptions: self.assumptions.clone(),
+                    dispatch: None,
                     span: access.member.span.clone(),
                 });
             }
             let interface = substitute(&method.interface, &map);
+            let member = AstId::new(&access.member, AstKind::Literal);
+            self.member_resolutions.insert(
+                member,
+                MemberResolution::InterfaceMethod {
+                    interface: method.owner,
+                    declaration: method.symbol,
+                    implementation: None,
+                },
+            );
             self.obligations.push_back(Obligation {
                 bound: InterfaceBound {
                     subject: receiver.clone(),
                     interface,
                 },
                 assumptions: self.assumptions.clone(),
+                dispatch: Some(DispatchOrigin {
+                    member,
+                    interface: method.owner,
+                    declaration: method.symbol,
+                    method: method.name.clone(),
+                }),
                 span: access.member.span.clone(),
             });
             return match access.call {
@@ -1389,9 +1456,13 @@ impl<'ast, 'input, 'allocator, 'environment> Checker<'ast, 'input, 'allocator, '
     fn infer_builtin_member(
         &mut self,
         receiver: &Type,
-        access: &'ast light_nix_parser::ast::PrimaryAccess<'input, 'allocator>,
+        access: &'ast PrimaryAccess<'input, 'allocator>,
     ) -> Option<Type> {
         let method = find_builtin_method(receiver, access.member.value)?;
+        self.member_resolutions.insert(
+            AstId::new(&access.member, AstKind::Literal),
+            MemberResolution::Builtin(method),
+        );
         let function = match method {
             BuiltinMethod::Contains => {
                 let element = collection_element(receiver)?;
@@ -1486,6 +1557,7 @@ impl<'ast, 'input, 'allocator, 'environment> Checker<'ast, 'input, 'allocator, '
             self.obligations.push_back(Obligation {
                 bound,
                 assumptions: self.assumptions.clone(),
+                dispatch: None,
                 span: span.clone(),
             });
         }
@@ -1628,9 +1700,19 @@ impl<'ast, 'input, 'allocator, 'environment> Checker<'ast, 'input, 'allocator, '
             let subject = self.unifier.resolve(&obligation.bound.subject);
             let interface = self.unifier.resolve(&obligation.bound.interface);
             if subject.is_error() || interface.is_error() {
+                self.clear_dispatch(obligation.dispatch.as_ref());
                 continue;
             }
             if self.try_assumptions(&subject, &interface, &obligation.assumptions) {
+                if obligation.dispatch.is_some()
+                    && !contains_unresolved_dispatch_type(&subject)
+                    && !contains_unresolved_dispatch_type(&interface)
+                {
+                    let successes = self.matching_implementations(&subject, &interface);
+                    if let [(_, _, implementation)] = successes.as_slice() {
+                        self.record_dispatch(obligation.dispatch.as_ref(), Some(*implementation));
+                    }
+                }
                 consecutively_deferred = 0;
                 continue;
             }
@@ -1642,18 +1724,24 @@ impl<'ast, 'input, 'allocator, 'environment> Checker<'ast, 'input, 'allocator, '
                     self.obligations.push_back(obligation);
                     consecutively_deferred += 1;
                 }
-                0 => self.error(
-                    TypeCheckErrorKind::MissingImplementation { subject, interface },
-                    obligation.span,
-                ),
+                0 => {
+                    self.clear_dispatch(obligation.dispatch.as_ref());
+                    self.error(
+                        TypeCheckErrorKind::MissingImplementation { subject, interface },
+                        obligation.span,
+                    );
+                }
                 1 => {
                     consecutively_deferred = 0;
-                    let (unifier, bounds) = successes.pop().expect("one successful candidate");
+                    let (unifier, bounds, implementation) =
+                        successes.pop().expect("one successful candidate");
                     self.unifier = unifier;
+                    self.record_dispatch(obligation.dispatch.as_ref(), Some(implementation));
                     for bound in bounds {
                         self.obligations.push_back(Obligation {
                             bound,
                             assumptions: obligation.assumptions.clone(),
+                            dispatch: None,
                             span: obligation.span.clone(),
                         });
                     }
@@ -1662,10 +1750,13 @@ impl<'ast, 'input, 'allocator, 'environment> Checker<'ast, 'input, 'allocator, '
                     self.obligations.push_back(obligation);
                     consecutively_deferred += 1;
                 }
-                _ => self.error(
-                    TypeCheckErrorKind::AmbiguousImplementation { subject, interface },
-                    obligation.span,
-                ),
+                _ => {
+                    self.clear_dispatch(obligation.dispatch.as_ref());
+                    self.error(
+                        TypeCheckErrorKind::AmbiguousImplementation { subject, interface },
+                        obligation.span,
+                    );
+                }
             }
             if !self.obligations.is_empty() && consecutively_deferred >= self.obligations.len() {
                 stalled = true;
@@ -1677,6 +1768,7 @@ impl<'ast, 'input, 'allocator, 'environment> Checker<'ast, 'input, 'allocator, '
                 let subject = self.unifier.resolve(&obligation.bound.subject);
                 let interface = self.unifier.resolve(&obligation.bound.interface);
                 let successes = self.matching_implementations(&subject, &interface);
+                self.clear_dispatch(obligation.dispatch.as_ref());
                 let kind = if successes.is_empty() {
                     TypeCheckErrorKind::MissingImplementation { subject, interface }
                 } else {
@@ -1689,6 +1781,7 @@ impl<'ast, 'input, 'allocator, 'environment> Checker<'ast, 'input, 'allocator, '
         if let Some(obligation) = self.obligations.pop_front() {
             let subject = self.unifier.resolve(&obligation.bound.subject);
             let interface = self.unifier.resolve(&obligation.bound.interface);
+            self.clear_dispatch(obligation.dispatch.as_ref());
             self.error(
                 TypeCheckErrorKind::OverflowEvaluatingBound { subject, interface },
                 obligation.span,
@@ -1701,14 +1794,13 @@ impl<'ast, 'input, 'allocator, 'environment> Checker<'ast, 'input, 'allocator, '
         &self,
         subject: &Type,
         interface: &Type,
-    ) -> Vec<(Unifier, Vec<InterfaceBound>)> {
+    ) -> Vec<(Unifier, Vec<InterfaceBound>, usize)> {
         let interface_id = named_type_id(interface);
-        let candidates = self
-            .implementations
-            .iter()
-            .filter(|implementation| named_type_id(&implementation.interface) == interface_id);
         let mut successes = Vec::new();
-        for implementation in candidates {
+        for (index, implementation) in self.implementations.iter().enumerate() {
+            if named_type_id(&implementation.interface) != interface_id {
+                continue;
+            }
             let mut trial = self.unifier.clone();
             let substitutions = instantiate_parameter_map(&mut trial, &implementation.parameters);
             let candidate_subject = substitute(&implementation.target, &substitutions);
@@ -1726,9 +1818,39 @@ impl<'ast, 'input, 'allocator, 'environment> Checker<'ast, 'input, 'allocator, '
                     interface: substitute(&bound.interface, &substitutions),
                 })
                 .collect();
-            successes.push((trial, bounds));
+            successes.push((trial, bounds, index));
         }
         successes
+    }
+
+    fn record_dispatch(
+        &mut self,
+        origin: Option<&DispatchOrigin<'ast>>,
+        implementation: Option<usize>,
+    ) {
+        let Some(origin) = origin else {
+            return;
+        };
+        let implementation = implementation.and_then(|index| {
+            self.implementations[index]
+                .methods
+                .get(&origin.method)
+                .copied()
+        });
+        self.member_resolutions.insert(
+            origin.member,
+            MemberResolution::InterfaceMethod {
+                interface: origin.interface,
+                declaration: origin.declaration,
+                implementation,
+            },
+        );
+    }
+
+    fn clear_dispatch(&mut self, origin: Option<&DispatchOrigin<'ast>>) {
+        if let Some(origin) = origin {
+            self.member_resolutions.remove(&origin.member);
+        }
     }
 
     fn try_assumptions(
@@ -1866,6 +1988,7 @@ impl<'ast, 'input, 'allocator, 'environment> Checker<'ast, 'input, 'allocator, '
                     interface: substitute(&bound.interface, &substitutions),
                 },
                 assumptions: self.assumptions.clone(),
+                dispatch: None,
                 span: span.clone(),
             });
         }
@@ -1996,6 +2119,24 @@ fn contains_type_variable(ty: &Type) -> bool {
         Type::Function(function) => {
             function.parameters.iter().any(contains_type_variable)
                 || contains_type_variable(&function.return_type)
+        }
+        _ => false,
+    }
+}
+
+fn contains_unresolved_dispatch_type(ty: &Type) -> bool {
+    match ty {
+        Type::Parameter(_) | Type::Variable(_) => true,
+        Type::Set(element) | Type::List(element) | Type::Optional(element) => {
+            contains_unresolved_dispatch_type(element)
+        }
+        Type::Named(_, arguments) => arguments.iter().any(contains_unresolved_dispatch_type),
+        Type::Function(function) => {
+            function
+                .parameters
+                .iter()
+                .any(contains_unresolved_dispatch_type)
+                || contains_unresolved_dispatch_type(&function.return_type)
         }
         _ => false,
     }
@@ -2248,6 +2389,13 @@ let contained = values.contains(1)
                     .ty,
                 Type::Bool
             );
+            let Expression::Primary(mapped_value) = mapped.value.unwrap() else {
+                panic!("expected primary map expression");
+            };
+            assert_eq!(
+                result.member_resolution(&mapped_value.accesses[0]),
+                Some(&MemberResolution::Builtin(BuiltinMethod::Map))
+            );
         });
     }
 
@@ -2280,6 +2428,16 @@ let nested: Int? = some(null)
                     .unwrap()
                     .ty,
                 Type::optional(Type::Int)
+            );
+            let Expression::Elvis(enabled_value) = enabled.value.unwrap() else {
+                panic!("expected elvis expression");
+            };
+            let Expression::Primary(optional) = enabled_value.optional else {
+                panic!("expected safe member access");
+            };
+            assert_eq!(
+                result.member_resolution(&optional.accesses[0]),
+                Some(&MemberResolution::Field(resolution.fields()[0].id))
             );
         });
     }
@@ -2363,6 +2521,28 @@ let inferred = extract:<Test>(test)
                     .unwrap()
                     .ty,
                 Type::Int
+            );
+            let Statement::InterfaceDefine(interface) = ast.statements[0] else {
+                panic!("expected interface");
+            };
+            let Statement::FunctionDefine(extract) = ast.statements[3] else {
+                panic!("expected extract function");
+            };
+            let Statement::Expression(Expression::Return(returned)) =
+                &extract.body.statements.statements[0]
+            else {
+                panic!("expected return expression");
+            };
+            let Expression::Primary(value) = returned.value.unwrap() else {
+                panic!("expected interface method access");
+            };
+            assert_eq!(
+                result.member_resolution(&value.accesses[0]),
+                Some(&MemberResolution::InterfaceMethod {
+                    interface: type_of(resolution, &interface.name),
+                    declaration: symbol_of(resolution, &interface.methods[0].name),
+                    implementation: None,
+                })
             );
         });
     }
@@ -2559,6 +2739,23 @@ let selected = test.value()
                     .unwrap()
                     .ty,
                 Type::Int
+            );
+            let Statement::InterfaceDefine(interface) = ast.statements[0] else {
+                panic!("expected IntegerValue interface");
+            };
+            let Statement::ImplementsDefine(implementation) = ast.statements[3] else {
+                panic!("expected IntegerValue implementation");
+            };
+            let Expression::Primary(selected_value) = selected.value.unwrap() else {
+                panic!("expected selected method call");
+            };
+            assert_eq!(
+                result.member_resolution(&selected_value.accesses[0]),
+                Some(&MemberResolution::InterfaceMethod {
+                    interface: type_of(resolution, &interface.name),
+                    declaration: symbol_of(resolution, &interface.methods[0].name),
+                    implementation: Some(symbol_of(resolution, &implementation.methods[0].name,)),
+                })
             );
         });
     }

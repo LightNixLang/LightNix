@@ -6,5 +6,6 @@ members = [
     "src/light-nix-parser",
     "src/light-nix-grammar",
     "src/light-nix-name-resolver",
+    "src/light-nix-dependency-graph",
     "src/light-nix-type-checker"
 ]

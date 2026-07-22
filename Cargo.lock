@@ -103,6 +103,16 @@ dependencies = [
 name = "light-nix"
 version = "0.1.0"
 dependencies = [
+ "light-nix-dependency-graph",
+ "light-nix-name-resolver",
+ "light-nix-parser",
+ "light-nix-type-checker",
+]
+
+[[package]]
+name = "light-nix-dependency-graph"
+version = "0.1.0"
+dependencies = [
  "light-nix-name-resolver",
  "light-nix-parser",
  "light-nix-type-checker",
