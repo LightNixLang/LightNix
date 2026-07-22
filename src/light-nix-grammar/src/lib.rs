@@ -39,7 +39,8 @@ mod grammar {
         enum_repr_body       ::= "{" [ lf ] { enum_repr_variant lf_or_comma } "}"
         enum_repr_variant    ::= literal "=" expression
 
-        type_define          ::= [ "export" ] "type" literal type_define_block
+        type_define          ::= [ "export" ] "type" literal [ generic_parameters ] [ lf ]
+                                 [ where_clause ] type_define_block
         type_define_block    ::= "{" [ lf ] { type_define_element lf_or_comma } "}"
         type_define_element  ::= [ mutation_policy ] literal ":" ( type_define_block | type_info )
 

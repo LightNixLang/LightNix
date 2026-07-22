@@ -102,6 +102,11 @@ dependencies = [
 [[package]]
 name = "light-nix"
 version = "0.1.0"
+dependencies = [
+ "light-nix-name-resolver",
+ "light-nix-parser",
+ "light-nix-type-checker",
+]
 
 [[package]]
 name = "light-nix-grammar"
@@ -125,6 +130,14 @@ dependencies = [
  "bumpalo",
  "extension-fn",
  "regex",
+]
+
+[[package]]
+name = "light-nix-type-checker"
+version = "0.1.0"
+dependencies = [
+ "light-nix-name-resolver",
+ "light-nix-parser",
 ]
 
 [[package]]

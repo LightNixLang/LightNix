@@ -1,9 +1,9 @@
+# !tyml @cargo/Cargo
 [package]
-name = "light-nix"
+name = "light-nix-type-checker"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 light-nix-parser = { path = "../light-nix-parser", version = "0.1.0" }
 light-nix-name-resolver = { path = "../light-nix-name-resolver", version = "0.1.0" }
-light-nix-type-checker = { path = "../light-nix-type-checker", version = "0.1.0" }

@@ -41,4 +41,6 @@ pub enum AstKind {
     FunctionArgument,
     GenericParameter,
     Pattern,
+    Expression,
+    TypeInfo,
 }

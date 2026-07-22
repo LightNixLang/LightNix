@@ -167,6 +167,7 @@ pub struct GenericParameter<'ast> {
 pub enum ScopeKind {
     Module,
     Block,
+    TypeDefinition,
     Function,
     MatchArm,
     Interface,
@@ -1044,7 +1045,7 @@ impl<'ast, 'input, 'allocator> CollectedModule<'ast, 'input, 'allocator> {
             }
             Statement::TypeDefine(node) => {
                 self.check_nested_export(node.exported, module_scope, node.span.clone());
-                self.resolve_typedef_block(node.body, scope);
+                self.resolve_type_define(node, scope);
             }
             Statement::InterfaceDefine(node) => {
                 self.check_nested_export(node.exported, module_scope, node.span.clone());
@@ -1285,6 +1286,15 @@ impl<'ast, 'input, 'allocator> CollectedModule<'ast, 'input, 'allocator> {
                 TypedefValue::TypeInfo(type_info) => self.resolve_type_info(type_info, scope),
             }
         }
+    }
+
+    fn resolve_type_define(&mut self, node: &'ast TypeDefine<'input, 'allocator>, parent: ScopeId) {
+        let scope = self.new_scope(Some(parent), ScopeKind::TypeDefinition);
+        self.resolve_generic_parameters(node.generic_parameters, scope);
+        if let Some(where_clause) = node.where_clause {
+            self.resolve_where_clause(where_clause, scope);
+        }
+        self.resolve_typedef_block(node.body, scope);
     }
 
     fn resolve_type_info(&mut self, type_info: &'ast TypeInfo<'input, 'allocator>, scope: ScopeId) {
@@ -1988,5 +1998,53 @@ let result = test:<Test>()
             resolution.resolve_literal(&test_type.name),
             Some(Res::Type(_))
         ));
+    }
+
+    #[test]
+    fn resolves_generic_parameters_inside_type_fields_and_where_clauses() {
+        let source = r#"
+interface Marker {}
+type Boxed<T: Marker>
+where T: Marker {
+    value: T
+    nested: { value: Set<T> }
+}
+declare let boxed: Boxed<String>
+"#;
+        let arena = AstArena::new();
+        let mut lexer = Lexer::new(source);
+        let mut parse_errors = ParseErrors::new_in(&arena);
+        let ast = parse_source(&mut lexer, &mut parse_errors, &arena);
+        assert!(parse_errors.is_empty(), "parse errors: {parse_errors:#?}");
+
+        let resolution = collect_module(ast, ModuleId(0)).resolve(&ImportEnvironment::default());
+        assert!(resolution.errors().is_empty(), "{:#?}", resolution.errors());
+        let Statement::TypeDefine(boxed) = ast.statements[1] else {
+            panic!("expected Boxed type");
+        };
+        let parameter = &boxed.generic_parameters.unwrap().parameters[0];
+        let Some(Declaration::GenericParameter(parameter_id)) =
+            resolution.declaration_of_literal(&parameter.name)
+        else {
+            panic!("expected generic parameter declaration");
+        };
+        let TypedefValue::TypeInfo(value_type) = boxed.body.fields[0].value else {
+            panic!("expected value type");
+        };
+        assert_eq!(
+            resolution.resolve_literal(&value_type.name),
+            Some(Res::GenericParameter(parameter_id))
+        );
+        let nested = match boxed.body.fields[1].value {
+            TypedefValue::Block(nested) => nested,
+            _ => panic!("expected nested type"),
+        };
+        let TypedefValue::TypeInfo(nested_value) = nested.fields[0].value else {
+            panic!("expected nested value type");
+        };
+        assert_eq!(
+            resolution.resolve_literal(&nested_value.parameters[0].name),
+            Some(Res::GenericParameter(parameter_id))
+        );
     }
 }

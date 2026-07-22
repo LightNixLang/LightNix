@@ -157,6 +157,8 @@ impl_ast!(impl<'input, 'allocator> for EnumVariant<'input, 'allocator>);
 pub struct TypeDefine<'input, 'allocator> {
     pub exported: bool,
     pub name: Literal<'input>,
+    pub generic_parameters: Option<&'allocator GenericParameters<'input, 'allocator>>,
+    pub where_clause: Option<&'allocator WhereClause<'input, 'allocator>>,
     pub body: &'allocator TypedefBlock<'input, 'allocator>,
     pub span: Range<usize>,
 }

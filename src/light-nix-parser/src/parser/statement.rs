@@ -599,10 +599,15 @@ fn parse_type_define<'input, 'allocator>(
         return None;
     };
 
+    let generic_parameters = parse_generic_parameters(lexer, errors, allocator);
+    skip_line_feed(lexer);
+    let where_clause = parse_where_clause(lexer, errors, allocator);
     let body = parse_typedef_block(lexer, errors, allocator)?;
     Some(allocator.alloc(TypeDefine {
         exported,
         name,
+        generic_parameters,
+        where_clause,
         body,
         span: anchor.elapsed(lexer),
     }))
@@ -3187,5 +3192,35 @@ let recovered = true
             Some(MutationPolicyKind::Tunable { cost: None })
         ));
         assert!(matches!(ast.statements[2], Statement::LetStatement(_)));
+    }
+
+    #[test]
+    fn parses_generic_type_definitions_and_where_clauses() {
+        let source = r#"
+export type Test<T: Comparable, U>
+where U: Comparable {
+    first: T,
+    second: Set<U>
+}
+declare let test: Test<String, Int>
+"#;
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert!(errors.is_empty(), "parse errors: {errors:#?}");
+        let Statement::TypeDefine(test) = ast.statements[0] else {
+            panic!("expected generic type");
+        };
+        assert!(test.exported);
+        assert_eq!(test.generic_parameters.unwrap().parameters.len(), 2);
+        assert_eq!(test.where_clause.unwrap().predicates.len(), 1);
+        assert_eq!(test.body.fields.len(), 2);
+        let Statement::LetStatement(value) = ast.statements[1] else {
+            panic!("expected Test value");
+        };
+        assert_eq!(value.type_info.unwrap().parameters.len(), 2);
     }
 }
