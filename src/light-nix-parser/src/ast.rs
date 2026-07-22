@@ -80,6 +80,8 @@ pub enum Statement<'input, 'allocator> {
     ImportStatement(&'allocator ImportStatement<'input, 'allocator>),
     EnumDefine(&'allocator EnumDefine<'input, 'allocator>),
     TypeDefine(&'allocator TypeDefine<'input, 'allocator>),
+    InterfaceDefine(&'allocator InterfaceDefine<'input, 'allocator>),
+    ImplementsDefine(&'allocator ImplementsDefine<'input, 'allocator>),
     UseDeclare(&'allocator UseDeclare<'input, 'allocator>),
     LetStatement(&'allocator LetStatement<'input, 'allocator>),
     AssertStatement(&'allocator AssertStatement<'input, 'allocator>),
@@ -94,6 +96,8 @@ impl AST for Statement<'_, '_> {
             Self::ImportStatement(node) => node.span(),
             Self::EnumDefine(node) => node.span(),
             Self::TypeDefine(node) => node.span(),
+            Self::InterfaceDefine(node) => node.span(),
+            Self::ImplementsDefine(node) => node.span(),
             Self::UseDeclare(node) => node.span(),
             Self::LetStatement(node) => node.span(),
             Self::AssertStatement(node) => node.span(),
@@ -158,6 +162,30 @@ pub struct TypeDefine<'input, 'allocator> {
 }
 
 impl_ast!(impl<'input, 'allocator> for TypeDefine<'input, 'allocator>);
+
+#[derive(Debug)]
+pub struct InterfaceDefine<'input, 'allocator> {
+    pub exported: bool,
+    pub name: Literal<'input>,
+    pub generic_parameters: Option<&'allocator GenericParameters<'input, 'allocator>>,
+    pub where_clause: Option<&'allocator WhereClause<'input, 'allocator>>,
+    pub methods: &'allocator [&'allocator FunctionDefine<'input, 'allocator>],
+    pub span: Range<usize>,
+}
+
+impl_ast!(impl<'input, 'allocator> for InterfaceDefine<'input, 'allocator>);
+
+#[derive(Debug)]
+pub struct ImplementsDefine<'input, 'allocator> {
+    pub generic_parameters: Option<&'allocator GenericParameters<'input, 'allocator>>,
+    pub interface: &'allocator TypeInfo<'input, 'allocator>,
+    pub target: &'allocator TypeInfo<'input, 'allocator>,
+    pub where_clause: Option<&'allocator WhereClause<'input, 'allocator>>,
+    pub methods: &'allocator [&'allocator FunctionDefine<'input, 'allocator>],
+    pub span: Range<usize>,
+}
+
+impl_ast!(impl<'input, 'allocator> for ImplementsDefine<'input, 'allocator>);
 
 #[derive(Debug)]
 pub struct TypedefBlock<'input, 'allocator> {
@@ -254,8 +282,10 @@ pub struct FunctionDefine<'input, 'allocator> {
     pub exported: bool,
     pub attribute: Spanned<FunctionAttribute>,
     pub name: Literal<'input>,
+    pub generic_parameters: Option<&'allocator GenericParameters<'input, 'allocator>>,
     pub arguments: FunctionArguments<'input, 'allocator>,
     pub return_type: Option<&'allocator TypeInfo<'input, 'allocator>>,
+    pub where_clause: Option<&'allocator WhereClause<'input, 'allocator>>,
     pub body: &'allocator Block<'input, 'allocator>,
     pub span: Range<usize>,
 }
@@ -270,6 +300,7 @@ pub enum FunctionAttribute {
 
 #[derive(Debug)]
 pub struct FunctionArguments<'input, 'allocator> {
+    pub receiver: Option<Literal<'input>>,
     pub arguments: &'allocator [FunctionArgument<'input, 'allocator>],
     pub span: Range<usize>,
 }
@@ -284,6 +315,40 @@ pub struct FunctionArgument<'input, 'allocator> {
 }
 
 impl_ast!(impl<'input, 'allocator> for FunctionArgument<'input, 'allocator>);
+
+#[derive(Debug)]
+pub struct GenericParameters<'input, 'allocator> {
+    pub parameters: &'allocator [GenericParameter<'input, 'allocator>],
+    pub span: Range<usize>,
+}
+
+impl_ast!(impl<'input, 'allocator> for GenericParameters<'input, 'allocator>);
+
+#[derive(Debug)]
+pub struct GenericParameter<'input, 'allocator> {
+    pub name: Literal<'input>,
+    pub bounds: &'allocator [&'allocator TypeInfo<'input, 'allocator>],
+    pub span: Range<usize>,
+}
+
+impl_ast!(impl<'input, 'allocator> for GenericParameter<'input, 'allocator>);
+
+#[derive(Debug)]
+pub struct WhereClause<'input, 'allocator> {
+    pub predicates: &'allocator [WherePredicate<'input, 'allocator>],
+    pub span: Range<usize>,
+}
+
+impl_ast!(impl<'input, 'allocator> for WhereClause<'input, 'allocator>);
+
+#[derive(Debug)]
+pub struct WherePredicate<'input, 'allocator> {
+    pub ty: &'allocator TypeInfo<'input, 'allocator>,
+    pub bounds: &'allocator [&'allocator TypeInfo<'input, 'allocator>],
+    pub span: Range<usize>,
+}
+
+impl_ast!(impl<'input, 'allocator> for WherePredicate<'input, 'allocator>);
 
 #[derive(Debug)]
 pub struct Block<'input, 'allocator> {
@@ -498,6 +563,7 @@ impl_ast!(impl<'input, 'allocator> for Primary<'input, 'allocator>);
 pub struct PrimaryAccess<'input, 'allocator> {
     pub operator: Spanned<AccessOperator>,
     pub member: Literal<'input>,
+    pub type_arguments: Option<&'allocator ExplicitTypeArguments<'input, 'allocator>>,
     pub call: Option<&'allocator FunctionCall<'input, 'allocator>>,
     pub span: Range<usize>,
 }
@@ -539,6 +605,7 @@ impl AST for Value<'_, '_> {
 #[derive(Debug)]
 pub struct LiteralValue<'input, 'allocator> {
     pub literal: Literal<'input>,
+    pub type_arguments: Option<&'allocator ExplicitTypeArguments<'input, 'allocator>>,
     pub call: Option<&'allocator FunctionCall<'input, 'allocator>>,
     pub span: Range<usize>,
 }
@@ -570,9 +637,32 @@ pub struct FunctionCall<'input, 'allocator> {
 impl_ast!(impl<'input, 'allocator> for FunctionCall<'input, 'allocator>);
 
 #[derive(Debug)]
+pub struct ExplicitTypeArguments<'input, 'allocator> {
+    pub arguments: &'allocator [ExplicitTypeArgument<'input, 'allocator>],
+    pub span: Range<usize>,
+}
+
+impl_ast!(impl<'input, 'allocator> for ExplicitTypeArguments<'input, 'allocator>);
+
+#[derive(Debug)]
+pub enum ExplicitTypeArgument<'input, 'allocator> {
+    Type(&'allocator TypeInfo<'input, 'allocator>),
+    Infer(Spanned<()>),
+}
+
+impl AST for ExplicitTypeArgument<'_, '_> {
+    fn span(&self) -> Range<usize> {
+        match self {
+            Self::Type(node) => node.span(),
+            Self::Infer(node) => node.span(),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct TypeInfo<'input, 'allocator> {
     pub name: Literal<'input>,
-    pub parameter: Option<&'allocator TypeInfo<'input, 'allocator>>,
+    pub parameters: &'allocator [&'allocator TypeInfo<'input, 'allocator>],
     pub optional: bool,
     pub span: Range<usize>,
 }

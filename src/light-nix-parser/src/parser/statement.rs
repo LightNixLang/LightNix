@@ -4,10 +4,11 @@ use bumpalo::Bump;
 use crate::{
     ast::{
         AssertStatement, AssignStatement, Block, EnumDefine, EnumVariant, Expression,
-        FunctionArgument, FunctionArguments, FunctionAttribute, FunctionDefine, ImportElement,
-        ImportKind, ImportStatement, LetStatement, Literal, MutationPolicy, MutationPolicyKind,
-        Source, Spanned, Statement, Statements, StringLiteral, TypeDefine, TypeInfo, Typedef,
-        TypedefBlock, TypedefValue, UseDeclare,
+        FunctionArgument, FunctionArguments, FunctionAttribute, FunctionDefine, GenericParameter,
+        GenericParameters, ImplementsDefine, ImportElement, ImportKind, ImportStatement,
+        InterfaceDefine, LetStatement, Literal, MutationPolicy, MutationPolicyKind, Source,
+        Spanned, Statement, Statements, StringLiteral, TypeDefine, TypeInfo, Typedef, TypedefBlock,
+        TypedefValue, UseDeclare, WhereClause, WherePredicate,
     },
     error::{Expected, ParseErrorKind, Scope, error_here, recover_until},
     lexer::{Lexer, TokenKind},
@@ -50,13 +51,14 @@ fn parse_statements<'input, 'allocator>(
             None => {
                 let kind = current_kind(lexer);
                 if errors.len() > error_count
-                    && matches!(
-                        kind,
-                        TokenKind::LineFeed
-                            | TokenKind::Semicolon
-                            | TokenKind::BraceRight
-                            | TokenKind::None
-                    )
+                    && (is_statement_start(kind)
+                        || matches!(
+                            kind,
+                            TokenKind::LineFeed
+                                | TokenKind::Semicolon
+                                | TokenKind::BraceRight
+                                | TokenKind::None
+                        ))
                 {
                     if stop_at_brace && kind == TokenKind::BraceRight {
                         break;
@@ -148,6 +150,12 @@ fn parse_statement<'input, 'allocator>(
         TokenKind::Export => parse_exported_statement(lexer, errors, allocator),
         TokenKind::Enum => parse_enum_define(lexer, errors, allocator).map(Statement::EnumDefine),
         TokenKind::Type => parse_type_define(lexer, errors, allocator).map(Statement::TypeDefine),
+        TokenKind::Interface => {
+            parse_interface_define(lexer, errors, allocator).map(Statement::InterfaceDefine)
+        }
+        TokenKind::Implements => {
+            parse_implements_define(lexer, errors, allocator).map(Statement::ImplementsDefine)
+        }
         TokenKind::Use => parse_use_declare(lexer, errors, allocator).map(Statement::UseDeclare),
         TokenKind::Let | TokenKind::Declare => {
             parse_let_statement(lexer, errors, allocator).map(Statement::LetStatement)
@@ -175,6 +183,9 @@ fn parse_exported_statement<'input, 'allocator>(
     match declaration_kind {
         TokenKind::Enum => parse_enum_define(lexer, errors, allocator).map(Statement::EnumDefine),
         TokenKind::Type => parse_type_define(lexer, errors, allocator).map(Statement::TypeDefine),
+        TokenKind::Interface => {
+            parse_interface_define(lexer, errors, allocator).map(Statement::InterfaceDefine)
+        }
         TokenKind::Declare | TokenKind::Let => {
             parse_let_statement(lexer, errors, allocator).map(Statement::LetStatement)
         }
@@ -720,6 +731,199 @@ fn parse_typedef_block<'input, 'allocator>(
     }))
 }
 
+fn parse_interface_define<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut ParseErrors<'input, 'allocator>,
+    allocator: &'allocator Bump,
+) -> Option<&'allocator InterfaceDefine<'input, 'allocator>> {
+    if !matches!(
+        current_kind(lexer),
+        TokenKind::Export | TokenKind::Interface
+    ) {
+        return None;
+    }
+
+    let anchor = lexer.cast_anchor();
+    let exported = parse_export_modifier(lexer);
+    if current_kind(lexer) != TokenKind::Interface {
+        return None;
+    }
+    lexer.next();
+
+    let Some(name) = parse_literal(lexer) else {
+        errors.push(error_here(
+            ParseErrorKind::InvalidInterfaceDefine,
+            lexer,
+            Expected::Literal,
+            Scope::InterfaceDefine,
+        ));
+        return None;
+    };
+
+    let generic_parameters = parse_generic_parameters(lexer, errors, allocator);
+    skip_line_feed(lexer);
+    let where_clause = parse_where_clause(lexer, errors, allocator);
+    let methods = parse_methods_block(
+        lexer,
+        errors,
+        allocator,
+        ParseErrorKind::InvalidInterfaceDefine,
+        Scope::InterfaceDefine,
+    )?;
+
+    Some(allocator.alloc(InterfaceDefine {
+        exported,
+        name,
+        generic_parameters,
+        where_clause,
+        methods,
+        span: anchor.elapsed(lexer),
+    }))
+}
+
+fn parse_implements_define<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut ParseErrors<'input, 'allocator>,
+    allocator: &'allocator Bump,
+) -> Option<&'allocator ImplementsDefine<'input, 'allocator>> {
+    if current_kind(lexer) != TokenKind::Implements {
+        return None;
+    }
+
+    let anchor = lexer.cast_anchor();
+    lexer.next();
+    let generic_parameters = parse_generic_parameters(lexer, errors, allocator);
+
+    let Some(interface) = parse_type_info(lexer, errors, allocator) else {
+        errors.push(error_here(
+            ParseErrorKind::InvalidImplementsDefine,
+            lexer,
+            Expected::TypeInfo,
+            Scope::ImplementsDefine,
+        ));
+        return None;
+    };
+
+    if current_kind(lexer) != TokenKind::For {
+        let error = recover_until(
+            ParseErrorKind::InvalidImplementsDefine,
+            lexer,
+            &[TokenKind::For, TokenKind::BraceLeft, TokenKind::LineFeed],
+            Expected::Token(TokenKind::For),
+            Scope::ImplementsDefine,
+            allocator,
+        );
+        errors.push(error);
+    }
+    if current_kind(lexer) != TokenKind::For {
+        return None;
+    }
+    lexer.next();
+
+    let Some(target) = parse_type_info(lexer, errors, allocator) else {
+        errors.push(error_here(
+            ParseErrorKind::InvalidImplementsDefine,
+            lexer,
+            Expected::TypeInfo,
+            Scope::ImplementsDefine,
+        ));
+        return None;
+    };
+
+    skip_line_feed(lexer);
+    let where_clause = parse_where_clause(lexer, errors, allocator);
+    let methods = parse_methods_block(
+        lexer,
+        errors,
+        allocator,
+        ParseErrorKind::InvalidImplementsDefine,
+        Scope::ImplementsDefine,
+    )?;
+
+    Some(allocator.alloc(ImplementsDefine {
+        generic_parameters,
+        interface,
+        target,
+        where_clause,
+        methods,
+        span: anchor.elapsed(lexer),
+    }))
+}
+
+fn parse_methods_block<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut ParseErrors<'input, 'allocator>,
+    allocator: &'allocator Bump,
+    invalid_kind: ParseErrorKind,
+    scope: Scope,
+) -> Option<&'allocator [&'allocator FunctionDefine<'input, 'allocator>]> {
+    if current_kind(lexer) != TokenKind::BraceLeft {
+        errors.push(error_here(
+            invalid_kind,
+            lexer,
+            Expected::Token(TokenKind::BraceLeft),
+            scope,
+        ));
+        return None;
+    }
+    lexer.next();
+    skip_statement_separator(lexer);
+
+    let mut methods = Vec::new_in(allocator);
+    while !matches!(current_kind(lexer), TokenKind::BraceRight | TokenKind::None) {
+        if matches!(current_kind(lexer), TokenKind::Inline | TokenKind::Opaque) {
+            if let Some(method) = parse_function_define(lexer, errors, allocator) {
+                methods.push(method);
+            }
+        } else {
+            let error = recover_until(
+                invalid_kind,
+                lexer,
+                &[
+                    TokenKind::LineFeed,
+                    TokenKind::Semicolon,
+                    TokenKind::BraceRight,
+                ],
+                Expected::Method,
+                scope,
+                allocator,
+            );
+            errors.push(error);
+        }
+
+        if current_kind(lexer) == TokenKind::BraceRight {
+            break;
+        }
+        if !skip_statement_separator(lexer) {
+            let error = recover_until(
+                ParseErrorKind::InvalidStatementSeparator,
+                lexer,
+                &[
+                    TokenKind::LineFeed,
+                    TokenKind::Semicolon,
+                    TokenKind::BraceRight,
+                ],
+                Expected::StatementSeparator,
+                scope,
+                allocator,
+            );
+            errors.push(error);
+            skip_statement_separator(lexer);
+        }
+    }
+
+    close_delimiter(
+        lexer,
+        errors,
+        allocator,
+        TokenKind::BraceRight,
+        ParseErrorKind::NonClosedBrace,
+        scope,
+    );
+
+    Some(allocator.alloc_slice_fill_iter(methods))
+}
+
 fn parse_use_declare<'input, 'allocator>(
     lexer: &mut Lexer<'input>,
     errors: &mut ParseErrors<'input, 'allocator>,
@@ -1068,16 +1272,29 @@ fn parse_function_define<'input, 'allocator>(
         return None;
     };
 
+    let generic_parameters = parse_generic_parameters(lexer, errors, allocator);
     let arguments = parse_function_arguments(lexer, errors, allocator)?;
     let return_type = parse_function_return_type(lexer, errors, allocator);
-    let body = parse_block(lexer, errors, allocator)?;
+    skip_line_feed(lexer);
+    let where_clause = parse_where_clause(lexer, errors, allocator);
+    let Some(body) = parse_block(lexer, errors, allocator) else {
+        errors.push(error_here(
+            ParseErrorKind::InvalidFunctionDefine,
+            lexer,
+            Expected::Block,
+            Scope::FunctionDefine,
+        ));
+        return None;
+    };
 
     Some(allocator.alloc(FunctionDefine {
         exported,
         attribute,
         name,
+        generic_parameters,
         arguments,
         return_type,
+        where_clause,
         body,
         span: anchor.elapsed(lexer),
     }))
@@ -1128,6 +1345,21 @@ fn parse_function_arguments<'input, 'allocator>(
     lexer.next();
     skip_line_feed(lexer);
     let mut arguments = Vec::new_in(allocator);
+    let receiver = if current_kind(lexer) == TokenKind::This {
+        let token = lexer.next().unwrap();
+        let receiver = Some(Literal::new(token.text, token.span));
+        if current_kind(lexer) != TokenKind::ParenthesisRight && !skip_list_separator(lexer) {
+            errors.push(error_here(
+                ParseErrorKind::InvalidFunctionArgument,
+                lexer,
+                Expected::Token(TokenKind::Comma),
+                Scope::FunctionArguments,
+            ));
+        }
+        receiver
+    } else {
+        None
+    };
 
     loop {
         if is_statement_start(current_kind(lexer)) {
@@ -1235,6 +1467,7 @@ fn parse_function_arguments<'input, 'allocator>(
 
     let arguments = allocator.alloc_slice_fill_iter(arguments);
     Some(FunctionArguments {
+        receiver,
         arguments,
         span: anchor.elapsed(lexer),
     })
@@ -1268,7 +1501,235 @@ pub(super) fn parse_block<'input, 'allocator>(
     }))
 }
 
-fn parse_type_info<'input, 'allocator>(
+fn parse_generic_parameters<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut ParseErrors<'input, 'allocator>,
+    allocator: &'allocator Bump,
+) -> Option<&'allocator GenericParameters<'input, 'allocator>> {
+    if current_kind(lexer) != TokenKind::LessThan {
+        return None;
+    }
+
+    let anchor = lexer.cast_anchor();
+    lexer.next();
+    skip_line_feed(lexer);
+    let mut parameters = Vec::new_in(allocator);
+
+    while !matches!(
+        current_kind(lexer),
+        TokenKind::GreaterThan | TokenKind::None
+    ) {
+        let parameter_anchor = lexer.cast_anchor();
+        let Some(name) = parse_literal(lexer) else {
+            let error = recover_until(
+                ParseErrorKind::InvalidGenericParameter,
+                lexer,
+                &[
+                    TokenKind::LineFeed,
+                    TokenKind::Comma,
+                    TokenKind::GreaterThan,
+                ],
+                Expected::GenericParameter,
+                Scope::GenericParameters,
+                allocator,
+            );
+            errors.push(error);
+            if current_kind(lexer) == TokenKind::GreaterThan {
+                break;
+            }
+            skip_list_separator(lexer);
+            continue;
+        };
+
+        let bounds = if current_kind(lexer) == TokenKind::Colon {
+            lexer.next();
+            parse_type_bounds(
+                lexer,
+                errors,
+                allocator,
+                Scope::GenericParameters,
+                ParseErrorKind::InvalidGenericParameter,
+            )
+        } else {
+            allocator.alloc_slice_copy(&[])
+        };
+        parameters.push(GenericParameter {
+            name,
+            bounds,
+            span: parameter_anchor.elapsed(lexer),
+        });
+
+        if current_kind(lexer) == TokenKind::GreaterThan {
+            break;
+        }
+        if !skip_list_separator(lexer) {
+            let error = recover_until(
+                ParseErrorKind::InvalidGenericParameter,
+                lexer,
+                &[
+                    TokenKind::LineFeed,
+                    TokenKind::Comma,
+                    TokenKind::GreaterThan,
+                ],
+                Expected::Token(TokenKind::Comma),
+                Scope::GenericParameters,
+                allocator,
+            );
+            errors.push(error);
+            skip_list_separator(lexer);
+        }
+    }
+
+    if parameters.is_empty() {
+        errors.push(error_here(
+            ParseErrorKind::InvalidGenericParameter,
+            lexer,
+            Expected::GenericParameter,
+            Scope::GenericParameters,
+        ));
+    }
+    close_delimiter(
+        lexer,
+        errors,
+        allocator,
+        TokenKind::GreaterThan,
+        ParseErrorKind::NonClosedTypeParameter,
+        Scope::GenericParameters,
+    );
+
+    let parameters = allocator.alloc_slice_fill_iter(parameters);
+    Some(allocator.alloc(GenericParameters {
+        parameters,
+        span: anchor.elapsed(lexer),
+    }))
+}
+
+fn parse_where_clause<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut ParseErrors<'input, 'allocator>,
+    allocator: &'allocator Bump,
+) -> Option<&'allocator WhereClause<'input, 'allocator>> {
+    if current_kind(lexer) != TokenKind::Where {
+        return None;
+    }
+
+    let anchor = lexer.cast_anchor();
+    lexer.next();
+    skip_line_feed(lexer);
+    let mut predicates = Vec::new_in(allocator);
+
+    while !matches!(current_kind(lexer), TokenKind::BraceLeft | TokenKind::None)
+        && !is_statement_start(current_kind(lexer))
+    {
+        let predicate_anchor = lexer.cast_anchor();
+        let Some(ty) = parse_type_info(lexer, errors, allocator) else {
+            let error = recover_until(
+                ParseErrorKind::InvalidWhereClause,
+                lexer,
+                &[TokenKind::LineFeed, TokenKind::Comma, TokenKind::BraceLeft],
+                Expected::WherePredicate,
+                Scope::WhereClause,
+                allocator,
+            );
+            errors.push(error);
+            if current_kind(lexer) == TokenKind::BraceLeft {
+                break;
+            }
+            skip_list_separator(lexer);
+            continue;
+        };
+
+        if current_kind(lexer) != TokenKind::Colon {
+            let error = recover_until(
+                ParseErrorKind::InvalidWhereClause,
+                lexer,
+                &[
+                    TokenKind::Colon,
+                    TokenKind::LineFeed,
+                    TokenKind::Comma,
+                    TokenKind::BraceLeft,
+                ],
+                Expected::Token(TokenKind::Colon),
+                Scope::WhereClause,
+                allocator,
+            );
+            errors.push(error);
+        }
+        let bounds = if current_kind(lexer) == TokenKind::Colon {
+            lexer.next();
+            parse_type_bounds(
+                lexer,
+                errors,
+                allocator,
+                Scope::WhereClause,
+                ParseErrorKind::InvalidWhereClause,
+            )
+        } else {
+            allocator.alloc_slice_copy(&[])
+        };
+        predicates.push(WherePredicate {
+            ty,
+            bounds,
+            span: predicate_anchor.elapsed(lexer),
+        });
+
+        if current_kind(lexer) == TokenKind::BraceLeft {
+            break;
+        }
+        if !skip_list_separator(lexer) {
+            let error = recover_until(
+                ParseErrorKind::InvalidWhereClause,
+                lexer,
+                &[TokenKind::LineFeed, TokenKind::Comma, TokenKind::BraceLeft],
+                Expected::Token(TokenKind::Comma),
+                Scope::WhereClause,
+                allocator,
+            );
+            errors.push(error);
+            skip_list_separator(lexer);
+        }
+    }
+
+    if predicates.is_empty() {
+        errors.push(error_here(
+            ParseErrorKind::InvalidWhereClause,
+            lexer,
+            Expected::WherePredicate,
+            Scope::WhereClause,
+        ));
+    }
+    let predicates = allocator.alloc_slice_fill_iter(predicates);
+    Some(allocator.alloc(WhereClause {
+        predicates,
+        span: anchor.elapsed(lexer),
+    }))
+}
+
+fn parse_type_bounds<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut ParseErrors<'input, 'allocator>,
+    allocator: &'allocator Bump,
+    scope: Scope,
+    error_kind: ParseErrorKind,
+) -> &'allocator [&'allocator TypeInfo<'input, 'allocator>] {
+    let mut bounds = Vec::new_in(allocator);
+    loop {
+        let Some(bound) = parse_type_info(lexer, errors, allocator) else {
+            errors.push(error_here(error_kind, lexer, Expected::TypeInfo, scope));
+            break;
+        };
+        bounds.push(bound);
+
+        if current_kind(lexer) != TokenKind::Plus {
+            break;
+        }
+        lexer.next();
+        skip_line_feed(lexer);
+    }
+    allocator.alloc_slice_fill_iter(bounds)
+}
+
+pub(super) fn parse_type_info<'input, 'allocator>(
     lexer: &mut Lexer<'input>,
     errors: &mut ParseErrors<'input, 'allocator>,
     allocator: &'allocator Bump,
@@ -1276,11 +1737,55 @@ fn parse_type_info<'input, 'allocator>(
     let anchor = lexer.cast_anchor();
     let name = parse_literal(lexer)?;
 
-    let parameter = if current_kind(lexer) == TokenKind::LessThan {
+    let mut parameters = Vec::new_in(allocator);
+    if current_kind(lexer) == TokenKind::LessThan {
         lexer.next();
+        skip_line_feed(lexer);
 
-        let parameter = parse_type_info(lexer, errors, allocator);
-        if parameter.is_none() {
+        while !matches!(
+            current_kind(lexer),
+            TokenKind::GreaterThan | TokenKind::None
+        ) {
+            if let Some(parameter) = parse_type_info(lexer, errors, allocator) {
+                parameters.push(parameter);
+            } else {
+                let error = recover_until(
+                    ParseErrorKind::InvalidTypeInfo,
+                    lexer,
+                    &[
+                        TokenKind::LineFeed,
+                        TokenKind::Comma,
+                        TokenKind::GreaterThan,
+                    ],
+                    Expected::TypeInfo,
+                    Scope::TypeInfo,
+                    allocator,
+                );
+                errors.push(error);
+            }
+
+            if current_kind(lexer) == TokenKind::GreaterThan {
+                break;
+            }
+            if !skip_list_separator(lexer) {
+                let error = recover_until(
+                    ParseErrorKind::InvalidTypeInfo,
+                    lexer,
+                    &[
+                        TokenKind::LineFeed,
+                        TokenKind::Comma,
+                        TokenKind::GreaterThan,
+                    ],
+                    Expected::Token(TokenKind::Comma),
+                    Scope::TypeInfo,
+                    allocator,
+                );
+                errors.push(error);
+                skip_list_separator(lexer);
+            }
+        }
+
+        if parameters.is_empty() {
             errors.push(error_here(
                 ParseErrorKind::InvalidTypeInfo,
                 lexer,
@@ -1288,7 +1793,6 @@ fn parse_type_info<'input, 'allocator>(
                 Scope::TypeInfo,
             ));
         }
-
         if current_kind(lexer) != TokenKind::GreaterThan {
             let error = recover_until(
                 ParseErrorKind::NonClosedTypeParameter,
@@ -1309,11 +1813,7 @@ fn parse_type_info<'input, 'allocator>(
         if current_kind(lexer) == TokenKind::GreaterThan {
             lexer.next();
         }
-
-        parameter
-    } else {
-        None
-    };
+    }
 
     let optional = if current_kind(lexer) == TokenKind::Question {
         lexer.next();
@@ -1341,9 +1841,10 @@ fn parse_type_info<'input, 'allocator>(
         errors.push(error);
     }
 
+    let parameters = allocator.alloc_slice_fill_iter(parameters);
     Some(allocator.alloc(TypeInfo {
         name,
-        parameter,
+        parameters,
         optional,
         span: anchor.elapsed(lexer),
     }))
@@ -1683,6 +2184,189 @@ inline function calculate(left: Number, right: Number) -> Number {
     }
 
     #[test]
+    fn parses_interfaces_generic_implements_where_clauses_and_type_arguments() {
+        let source = r#"
+export interface Container<T: Comparable> where This: Sized {
+    inline function contains<U>(this, value: T) -> Bool
+    where U: TestInterface<T> {
+        return true
+    }
+}
+
+implements<T> Container<T> for Set<T>
+where T: Comparable {
+    opaque function contains(this, value: T) -> Bool {
+        return true
+    }
+}
+
+inline function test<T, U>() -> U
+where T: TestInterface<U> {
+    return fallback
+}
+
+let value = test:<Test, _>()
+let mapped = values.map:<String>(convert:<String>)
+"#;
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert!(errors.is_empty(), "parse errors: {errors:#?}");
+        assert_eq!(ast.statements.len(), 5);
+
+        let Statement::InterfaceDefine(interface) = &ast.statements[0] else {
+            panic!("expected interface definition");
+        };
+        assert!(interface.exported);
+        assert_eq!(interface.name.value, "Container");
+        let generic_parameters = interface.generic_parameters.unwrap();
+        assert_eq!(generic_parameters.parameters.len(), 1);
+        assert_eq!(generic_parameters.parameters[0].name.value, "T");
+        assert_eq!(
+            generic_parameters.parameters[0].bounds[0].name.value,
+            "Comparable"
+        );
+        assert_eq!(
+            interface.where_clause.unwrap().predicates[0].ty.name.value,
+            "This"
+        );
+        assert_eq!(interface.methods.len(), 1);
+        let method = interface.methods[0];
+        assert_eq!(method.arguments.receiver.as_ref().unwrap().value, "this");
+        assert_eq!(
+            method.generic_parameters.unwrap().parameters[0].name.value,
+            "U"
+        );
+        assert_eq!(method.where_clause.unwrap().predicates.len(), 1);
+
+        let Statement::ImplementsDefine(implements) = &ast.statements[1] else {
+            panic!("expected implements definition");
+        };
+        assert_eq!(implements.interface.name.value, "Container");
+        assert_eq!(implements.interface.parameters[0].name.value, "T");
+        assert_eq!(implements.target.name.value, "Set");
+        assert_eq!(implements.target.parameters[0].name.value, "T");
+        assert_eq!(implements.methods.len(), 1);
+
+        let Statement::FunctionDefine(function) = &ast.statements[2] else {
+            panic!("expected generic function");
+        };
+        assert_eq!(function.generic_parameters.unwrap().parameters.len(), 2);
+        assert_eq!(function.return_type.unwrap().name.value, "U");
+        assert_eq!(function.where_clause.unwrap().predicates.len(), 1);
+
+        let Statement::LetStatement(value) = &ast.statements[3] else {
+            panic!("expected explicit generic call");
+        };
+        let Expression::Primary(value) = value.value.unwrap() else {
+            panic!("expected primary call");
+        };
+        let Value::Literal(value) = &value.value else {
+            panic!("expected literal callee");
+        };
+        let type_arguments = value.type_arguments.unwrap();
+        assert_eq!(type_arguments.arguments.len(), 2);
+        assert!(matches!(
+            type_arguments.arguments[0],
+            crate::ast::ExplicitTypeArgument::Type(_)
+        ));
+        assert!(matches!(
+            type_arguments.arguments[1],
+            crate::ast::ExplicitTypeArgument::Infer(_)
+        ));
+
+        let Statement::LetStatement(mapped) = &ast.statements[4] else {
+            panic!("expected generic method call");
+        };
+        let Expression::Primary(mapped) = mapped.value.unwrap() else {
+            panic!("expected method primary");
+        };
+        assert_eq!(mapped.accesses[0].member.value, "map");
+        assert_eq!(
+            mapped.accesses[0].type_arguments.unwrap().arguments.len(),
+            1
+        );
+        let call = mapped.accesses[0].call.unwrap();
+        let Expression::Primary(converter) = &call.arguments[0] else {
+            panic!("expected generic function value");
+        };
+        let Value::Literal(converter) = &converter.value else {
+            panic!("expected converter literal");
+        };
+        assert!(converter.call.is_none());
+        assert_eq!(converter.type_arguments.unwrap().arguments.len(), 1);
+    }
+
+    #[test]
+    fn parses_multiple_nested_type_parameters() {
+        let source = "let value: Result<Map<String, List<Int?>>, Error?>?";
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert!(errors.is_empty(), "parse errors: {errors:#?}");
+        let Statement::LetStatement(value) = ast.statements[0] else {
+            panic!("expected value binding");
+        };
+        let result = value.type_info.unwrap();
+        assert!(result.optional);
+        assert_eq!(result.parameters.len(), 2);
+        let map = result.parameters[0];
+        assert_eq!(map.name.value, "Map");
+        assert_eq!(map.parameters.len(), 2);
+        assert_eq!(map.parameters[0].name.value, "String");
+        assert!(map.parameters[1].parameters[0].optional);
+        assert!(result.parameters[1].optional);
+    }
+
+    #[test]
+    fn generic_syntax_errors_recover_to_following_statements() {
+        let source = r#"
+interface Broken<T: Comparable +> {}
+let broken = test:<>();
+let recovered = true
+"#;
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert!(errors.iter().any(|error| matches!(
+            error.kind,
+            ParseErrorKind::InvalidGenericParameter | ParseErrorKind::InvalidTypeArgument
+        )));
+        assert_eq!(ast.statements.len(), 3, "parse errors: {errors:#?}");
+        assert!(matches!(ast.statements[2], Statement::LetStatement(_)));
+    }
+
+    #[test]
+    fn missing_generic_function_body_preserves_the_following_statement() {
+        let source = r#"
+inline function broken<T>() -> T
+where T: Comparable
+let recovered = true
+"#;
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert!(errors.iter().any(|error| {
+            error.kind == ParseErrorKind::InvalidFunctionDefine
+                && error.expected == crate::error::Expected::Block
+        }));
+        assert_eq!(ast.statements.len(), 1, "parse errors: {errors:#?}");
+        assert!(matches!(ast.statements[0], Statement::LetStatement(_)));
+    }
+
+    #[test]
     fn recovers_inside_a_statement_and_parses_following_statements() {
         let source = r#"
 enum Profile { Desktop, =, Laptop }
@@ -1815,7 +2499,7 @@ let selected: string = match parsed {
         };
         let wrapped_type = wrapped.type_info.unwrap();
         assert!(wrapped_type.optional);
-        assert!(wrapped_type.parameter.unwrap().optional);
+        assert!(wrapped_type.parameters[0].optional);
         let Expression::Primary(wrapped) = wrapped.value.unwrap() else {
             panic!("expected some value");
         };
@@ -2055,7 +2739,7 @@ let tunable complete: List<String> = []
         ));
         assert_eq!(complete.type_info.unwrap().name.value, "List");
         assert_eq!(
-            complete.type_info.unwrap().parameter.unwrap().name.value,
+            complete.type_info.unwrap().parameters[0].name.value,
             "String"
         );
         assert!(complete.value.is_some());

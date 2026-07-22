@@ -4,16 +4,19 @@ use bumpalo::Bump;
 use crate::{
     ast::{
         AST, AccessOperator, Array, BinaryExpression, BinaryOperator, ElseBranch, ElseBranchValue,
-        ElvisExpression, EnumVariantPattern, Expression, FunctionCall, IfBranch, IfExpression,
-        Literal, LiteralValue, MatchArm, MatchExpression, Pattern, Primary, PrimaryAccess,
-        ReturnExpression, SomePattern, SomeValue, Spanned, StringLiteral, ThrowExpression,
-        UnaryExpression, UnaryOperator, Value,
+        ElvisExpression, EnumVariantPattern, ExplicitTypeArgument, ExplicitTypeArguments,
+        Expression, FunctionCall, IfBranch, IfExpression, Literal, LiteralValue, MatchArm,
+        MatchExpression, Pattern, Primary, PrimaryAccess, ReturnExpression, SomePattern, SomeValue,
+        Spanned, StringLiteral, ThrowExpression, UnaryExpression, UnaryOperator, Value,
     },
     error::{Expected, ParseErrorKind, Scope, error_here, recover_until},
     lexer::{Lexer, TokenKind},
 };
 
-use super::{ParseErrors, current_kind, is_statement_start, skip_line_feed, skip_list_separator};
+use super::{
+    ParseErrors, current_kind, is_statement_start, skip_line_feed, skip_list_separator,
+    statement::parse_type_info,
+};
 
 pub(super) fn parse_expression<'input, 'allocator>(
     lexer: &mut Lexer<'input>,
@@ -189,11 +192,13 @@ fn parse_primary<'input, 'allocator>(
 
         let member_token = lexer.next().unwrap();
         let member = Literal::new(member_token.text, member_token.span);
+        let type_arguments = parse_explicit_type_arguments(lexer, errors, allocator);
         let call = parse_function_call(lexer, errors, allocator);
 
         accesses.push(PrimaryAccess {
             operator,
             member,
+            type_arguments,
             call,
             span: access_anchor.elapsed(lexer),
         });
@@ -218,13 +223,15 @@ fn parse_value<'input, 'allocator>(
     match token.kind {
         TokenKind::BracketLeft => parse_array(lexer, errors, allocator).map(Value::Array),
         TokenKind::Some => parse_some_value(lexer, errors, allocator).map(Value::Some),
-        TokenKind::Literal => {
+        TokenKind::Literal | TokenKind::This => {
             let anchor = lexer.cast_anchor();
             let token = lexer.next().unwrap();
             let literal = Literal::new(token.text, token.span);
+            let type_arguments = parse_explicit_type_arguments(lexer, errors, allocator);
             let call = parse_function_call(lexer, errors, allocator);
             Some(Value::Literal(LiteralValue {
                 literal,
+                type_arguments,
                 call,
                 span: anchor.elapsed(lexer),
             }))
@@ -408,6 +415,109 @@ fn parse_array<'input, 'allocator>(
     let values = allocator.alloc_slice_fill_iter(values);
     Some(allocator.alloc(Array {
         values,
+        span: anchor.elapsed(lexer),
+    }))
+}
+
+fn parse_explicit_type_arguments<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut ParseErrors<'input, 'allocator>,
+    allocator: &'allocator Bump,
+) -> Option<&'allocator ExplicitTypeArguments<'input, 'allocator>> {
+    if current_kind(lexer) != TokenKind::Colon {
+        return None;
+    }
+
+    let anchor = lexer.cast_anchor();
+    lexer.next();
+    if current_kind(lexer) != TokenKind::LessThan {
+        lexer.back_to_anchor(anchor);
+        return None;
+    }
+    lexer.next();
+    skip_line_feed(lexer);
+
+    let mut arguments = Vec::new_in(allocator);
+    while !matches!(
+        current_kind(lexer),
+        TokenKind::GreaterThan | TokenKind::None
+    ) {
+        let argument = if lexer.current().is_some_and(|token| token.text == "_") {
+            let token = lexer.next().unwrap();
+            ExplicitTypeArgument::Infer(Spanned::new((), token.span))
+        } else if let Some(ty) = parse_type_info(lexer, errors, allocator) {
+            ExplicitTypeArgument::Type(ty)
+        } else {
+            let error = recover_until(
+                ParseErrorKind::InvalidTypeArgument,
+                lexer,
+                &[
+                    TokenKind::LineFeed,
+                    TokenKind::Comma,
+                    TokenKind::GreaterThan,
+                    TokenKind::ParenthesisLeft,
+                ],
+                Expected::TypeArgument,
+                Scope::ExplicitTypeArguments,
+                allocator,
+            );
+            errors.push(error);
+            if current_kind(lexer) == TokenKind::GreaterThan {
+                break;
+            }
+            skip_list_separator(lexer);
+            continue;
+        };
+        arguments.push(argument);
+
+        if current_kind(lexer) == TokenKind::GreaterThan {
+            break;
+        }
+        if !skip_list_separator(lexer) {
+            let error = recover_until(
+                ParseErrorKind::InvalidTypeArgument,
+                lexer,
+                &[
+                    TokenKind::LineFeed,
+                    TokenKind::Comma,
+                    TokenKind::GreaterThan,
+                    TokenKind::ParenthesisLeft,
+                ],
+                Expected::Token(TokenKind::Comma),
+                Scope::ExplicitTypeArguments,
+                allocator,
+            );
+            errors.push(error);
+            skip_list_separator(lexer);
+        }
+    }
+
+    if arguments.is_empty() {
+        errors.push(error_here(
+            ParseErrorKind::InvalidTypeArgument,
+            lexer,
+            Expected::TypeArgument,
+            Scope::ExplicitTypeArguments,
+        ));
+    }
+    if current_kind(lexer) != TokenKind::GreaterThan {
+        let error = recover_until(
+            ParseErrorKind::NonClosedTypeParameter,
+            lexer,
+            &[TokenKind::GreaterThan, TokenKind::ParenthesisLeft],
+            Expected::Token(TokenKind::GreaterThan),
+            Scope::ExplicitTypeArguments,
+            allocator,
+        );
+        errors.push(error);
+    }
+    if current_kind(lexer) == TokenKind::GreaterThan {
+        lexer.next();
+    }
+
+    let arguments = allocator.alloc_slice_fill_iter(arguments);
+    Some(allocator.alloc(ExplicitTypeArguments {
+        arguments,
         span: anchor.elapsed(lexer),
     }))
 }

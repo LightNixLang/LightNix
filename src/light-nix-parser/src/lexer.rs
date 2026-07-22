@@ -17,6 +17,16 @@ pub enum TokenKind {
     Enum,
     /// type
     Type,
+    /// interface
+    Interface,
+    /// implements
+    Implements,
+    /// where
+    Where,
+    /// for
+    For,
+    /// this
+    This,
     /// use
     Use,
     /// tunable
@@ -141,6 +151,11 @@ static TOKENIZERS: &[Tokenizer] = &[
     Tokenizer::Keyword(TokenKind::As, "as"),
     Tokenizer::Keyword(TokenKind::Enum, "enum"),
     Tokenizer::Keyword(TokenKind::Type, "type"),
+    Tokenizer::Keyword(TokenKind::Interface, "interface"),
+    Tokenizer::Keyword(TokenKind::Implements, "implements"),
+    Tokenizer::Keyword(TokenKind::Where, "where"),
+    Tokenizer::Keyword(TokenKind::For, "for"),
+    Tokenizer::Keyword(TokenKind::This, "this"),
     Tokenizer::Keyword(TokenKind::Use, "use"),
     Tokenizer::Keyword(TokenKind::Tunable, "tunable"),
     Tokenizer::Keyword(TokenKind::Readonly, "readonly"),

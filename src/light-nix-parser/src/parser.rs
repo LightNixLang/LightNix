@@ -27,6 +27,8 @@ pub(crate) fn is_statement_start(kind: TokenKind) -> bool {
             | TokenKind::Export
             | TokenKind::Enum
             | TokenKind::Type
+            | TokenKind::Interface
+            | TokenKind::Implements
             | TokenKind::Use
             | TokenKind::Let
             | TokenKind::Assert

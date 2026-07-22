@@ -14,6 +14,8 @@ mod grammar {
         statement            ::= import_statement
                                  | enum_define
                                  | type_define
+                                 | interface_define
+                                 | implements_define
                                  | use_declare
                                  | let_statement
                                  | assert_statement
@@ -41,6 +43,16 @@ mod grammar {
         type_define_block    ::= "{" [ lf ] { type_define_element lf_or_comma } "}"
         type_define_element  ::= [ mutation_policy ] literal ":" ( type_define_block | type_info )
 
+        interface_define     ::= [ "export" ] "interface" literal [ generic_parameters ] [ lf ]
+                                 [ where_clause ] interface_block
+        interface_block      ::= "{" [ lf_or_semicolons ]
+                                 { method_define lf_or_semicolons } "}"
+
+        implements_define    ::= "implements" [ generic_parameters ] type_info "for" type_info [ lf ]
+                                 [ where_clause ] implements_block
+        implements_block     ::= "{" [ lf_or_semicolons ]
+                                 { method_define lf_or_semicolons } "}"
+
         use_declare          ::= "use" "[" [ lf ] { literal lf_or_comma } "]"
 
         let_statement        ::= [ "export" ] [ "declare" ] "let" [ mutation_policy ] literal [ ":" type_info ] [ "=" [ lf ] expression ]
@@ -52,11 +64,22 @@ mod grammar {
 
         assign_statement     ::= expression "=" expression
 
-        function_define      ::= [ "export" ] function_attribute "function" literal function_arguments [ function_return_type ] block
+        function_define      ::= [ "export" ] method_define
+        method_define        ::= function_attribute "function" literal [ generic_parameters ]
+                                 function_arguments [ function_return_type ] [ lf ]
+                                 [ where_clause ] block
         function_attribute   ::= "inline" | "opaque"
-        function_arguments   ::= "(" [ lf ] { function_argument [ lf_or_comma ] } ")"
+        function_arguments   ::= "(" [ lf ] [ "this" [ lf_or_comma ] ]
+                                 { function_argument [ lf_or_comma ] } ")"
         function_argument    ::= literal ":" type_info
         function_return_type ::= "->" type_info
+
+        generic_parameters   ::= "<" [ lf ] { generic_parameter [ lf_or_comma ] } ">"
+        generic_parameter    ::= literal [ ":" interface_bound { "+" interface_bound } ]
+
+        where_clause         ::= "where" [ lf ] { where_predicate [ lf_or_comma ] }
+        where_predicate      ::= type_info ":" interface_bound { "+" interface_bound }
+        interface_bound      ::= type_info
 
         block                ::= "{" statements "}"
 
@@ -89,9 +112,10 @@ mod grammar {
         mul_or_div_expr      ::= factor { ( "*" | "/" ) factor }
         factor               ::= ( "+" | "-" ) primary | primary
 
-        primary              ::= value { ( "." | "?." | "::" ) [ lf ] literal [ function_call ] }
+        primary              ::= value { ( "." | "?." | "::" ) [ lf ] literal
+                                           [ type_arguments ] [ function_call ] }
         value                ::= array
-                                 | literal [ function_call ]
+                                 | literal [ type_arguments ] [ function_call ]
                                  | some_value
                                  | numeric_literal
                                  | string_literal
@@ -102,8 +126,10 @@ mod grammar {
         some_value           ::= "some" "(" expression ")"
 
         function_call        ::= "(" [ lf ] { expression lf_or_comma } ")"
+        type_arguments       ::= ":" "<" [ lf ] { type_argument [ lf_or_comma ] } ">"
+        type_argument        ::= type_info | "_"
 
-        type_info            ::= literal [ "<" type_info ">" ] [ "?" ]
+        type_info            ::= literal [ "<" [ lf ] { type_info [ lf_or_comma ] } ">" ] [ "?" ]
 
         literal              ::= r"\w+"
 

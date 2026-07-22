@@ -1,9 +1,10 @@
 use std::{collections::HashMap, ops::Range};
 
 use light_nix_parser::ast::{
-    AccessOperator, Array, Block, ElseBranchValue, EnumDefine, Expression, FunctionCall,
-    FunctionDefine, ImportKind, LetStatement, Literal, MatchArm, Pattern, Primary, Source,
-    Statement, Statements, TypeDefine, TypeInfo, TypedefBlock, TypedefValue, Value,
+    AccessOperator, Array, Block, ElseBranchValue, EnumDefine, ExplicitTypeArgument, Expression,
+    FunctionCall, FunctionDefine, GenericParameters, ImplementsDefine, ImportKind, InterfaceDefine,
+    LetStatement, Literal, MatchArm, Pattern, Primary, Source, Statement, Statements, TypeDefine,
+    TypeInfo, TypedefBlock, TypedefValue, Value, WhereClause,
 };
 
 use crate::{
@@ -46,6 +47,12 @@ pub struct VariantId {
     pub index: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct GenericParameterId {
+    pub module: ModuleId,
+    pub index: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Namespace {
     Value,
@@ -71,6 +78,7 @@ pub enum Res {
     EnumVariant(VariantId),
     Module(ModuleId),
     BuiltinType(BuiltinType),
+    GenericParameter(GenericParameterId),
     /// A field, method, or compiler-provided static member resolved after typing.
     Member(NameId),
     Error,
@@ -82,6 +90,7 @@ pub enum Declaration {
     Type(TypeDefId),
     Field(FieldId),
     EnumVariant(VariantId),
+    GenericParameter(GenericParameterId),
     Module(ModuleId),
     Import {
         module: ModuleId,
@@ -112,6 +121,7 @@ pub struct Symbol<'ast> {
 pub enum TypeDefKind {
     Record,
     Enum,
+    Interface,
 }
 
 #[derive(Debug)]
@@ -145,12 +155,22 @@ pub struct Variant<'ast> {
     pub span: Range<usize>,
 }
 
+#[derive(Debug)]
+pub struct GenericParameter<'ast> {
+    pub id: GenericParameterId,
+    pub name: NameId,
+    pub declaration: AstId<'ast>,
+    pub span: Range<usize>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScopeKind {
     Module,
     Block,
     Function,
     MatchArm,
+    Interface,
+    Implements,
 }
 
 #[derive(Debug, Clone)]
@@ -271,6 +291,7 @@ pub struct CollectedModule<'ast, 'input, 'allocator> {
     types: Vec<TypeDef<'ast>>,
     fields: Vec<Field<'ast>>,
     variants: Vec<Variant<'ast>>,
+    generic_parameters: Vec<GenericParameter<'ast>>,
     declarations: HashMap<AstId<'ast>, Declaration>,
     references: HashMap<AstId<'ast>, Res>,
     scopes: Vec<Scope>,
@@ -303,6 +324,7 @@ impl<'ast, 'input, 'allocator> CollectedModule<'ast, 'input, 'allocator> {
             types: self.types,
             fields: self.fields,
             variants: self.variants,
+            generic_parameters: self.generic_parameters,
             declarations: self.declarations,
             references: self.references,
             scopes: self.scopes,
@@ -320,6 +342,7 @@ pub struct NameResolution<'ast> {
     types: Vec<TypeDef<'ast>>,
     fields: Vec<Field<'ast>>,
     variants: Vec<Variant<'ast>>,
+    generic_parameters: Vec<GenericParameter<'ast>>,
     declarations: HashMap<AstId<'ast>, Declaration>,
     references: HashMap<AstId<'ast>, Res>,
     scopes: Vec<Scope>,
@@ -351,6 +374,10 @@ impl<'ast> NameResolution<'ast> {
 
     pub fn variants(&self) -> &[Variant<'ast>] {
         &self.variants
+    }
+
+    pub fn generic_parameters(&self) -> &[GenericParameter<'ast>] {
+        &self.generic_parameters
     }
 
     pub fn scopes(&self) -> &[Scope] {
@@ -398,6 +425,7 @@ pub fn collect_module<'ast, 'input, 'allocator>(
         types: Vec::new(),
         fields: Vec::new(),
         variants: Vec::new(),
+        generic_parameters: Vec::new(),
         declarations: HashMap::new(),
         references: HashMap::new(),
         scopes: vec![Scope {
@@ -461,6 +489,9 @@ impl<'ast, 'input, 'allocator> CollectedModule<'ast, 'input, 'allocator> {
                 Statement::TypeDefine(node) => {
                     self.collect_named_record(node, self.root_scope);
                 }
+                Statement::InterfaceDefine(node) => {
+                    self.collect_interface(node, self.root_scope);
+                }
                 Statement::LetStatement(node) => {
                     self.collect_let(node, self.root_scope);
                 }
@@ -484,6 +515,9 @@ impl<'ast, 'input, 'allocator> CollectedModule<'ast, 'input, 'allocator> {
                 }
                 Statement::TypeDefine(node) => {
                     self.collect_named_record(node, scope);
+                }
+                Statement::InterfaceDefine(node) => {
+                    self.collect_interface(node, scope);
                 }
                 Statement::FunctionDefine(node) => {
                     self.collect_function(node, scope);
@@ -605,6 +639,29 @@ impl<'ast, 'input, 'allocator> CollectedModule<'ast, 'input, 'allocator> {
         self.collect_record_fields(node.body, id);
     }
 
+    fn collect_interface(
+        &mut self,
+        node: &'ast InterfaceDefine<'input, 'allocator>,
+        scope: ScopeId,
+    ) {
+        let name = self.names.intern(node.name.value);
+        let id = self.allocate_type(
+            Some(name),
+            TypeDefKind::Interface,
+            AstId::new(&node.name, AstKind::Literal),
+            node.span.clone(),
+            node.exported,
+        );
+        self.define(
+            scope,
+            Namespace::Type,
+            name,
+            Res::Type(id),
+            Some(node.name.span.clone()),
+            node.name.span.clone(),
+        );
+    }
+
     fn collect_anonymous_record(
         &mut self,
         block: &'ast TypedefBlock<'input, 'allocator>,
@@ -714,6 +771,27 @@ impl<'ast, 'input, 'allocator> CollectedModule<'ast, 'input, 'allocator> {
             fields: Vec::new(),
             variants: Vec::new(),
             exported,
+        });
+        id
+    }
+
+    fn allocate_generic_parameter(
+        &mut self,
+        name: NameId,
+        declaration: AstId<'ast>,
+        span: Range<usize>,
+    ) -> GenericParameterId {
+        let id = GenericParameterId {
+            module: self.module,
+            index: index_u32(self.generic_parameters.len()),
+        };
+        self.declarations
+            .insert(declaration, Declaration::GenericParameter(id));
+        self.generic_parameters.push(GenericParameter {
+            id,
+            name,
+            declaration,
+            span,
         });
         id
     }
@@ -968,6 +1046,13 @@ impl<'ast, 'input, 'allocator> CollectedModule<'ast, 'input, 'allocator> {
                 self.check_nested_export(node.exported, module_scope, node.span.clone());
                 self.resolve_typedef_block(node.body, scope);
             }
+            Statement::InterfaceDefine(node) => {
+                self.check_nested_export(node.exported, module_scope, node.span.clone());
+                self.resolve_interface(node, scope, imports);
+            }
+            Statement::ImplementsDefine(node) => {
+                self.resolve_implements(node, scope, imports);
+            }
             Statement::UseDeclare(_) => {}
             Statement::LetStatement(node) => {
                 self.check_nested_export(node.exported, module_scope, node.span.clone());
@@ -1010,6 +1095,119 @@ impl<'ast, 'input, 'allocator> CollectedModule<'ast, 'input, 'allocator> {
         }
     }
 
+    fn resolve_interface(
+        &mut self,
+        interface: &'ast InterfaceDefine<'input, 'allocator>,
+        parent: ScopeId,
+        imports: &ImportEnvironment,
+    ) {
+        let scope = self.new_scope(Some(parent), ScopeKind::Interface);
+        self.define_this_parameter(
+            scope,
+            AstId::new(interface, AstKind::InterfaceDefine),
+            interface.name.span.clone(),
+        );
+        self.resolve_generic_parameters(interface.generic_parameters, scope);
+        if let Some(where_clause) = interface.where_clause {
+            self.resolve_where_clause(where_clause, scope);
+        }
+        for method in interface.methods {
+            self.collect_function(method, scope);
+        }
+        for method in interface.methods {
+            self.resolve_function(method, scope, imports);
+        }
+    }
+
+    fn resolve_implements(
+        &mut self,
+        implements: &'ast ImplementsDefine<'input, 'allocator>,
+        parent: ScopeId,
+        imports: &ImportEnvironment,
+    ) {
+        let scope = self.new_scope(Some(parent), ScopeKind::Implements);
+        self.define_this_parameter(
+            scope,
+            AstId::new(implements, AstKind::ImplementsDefine),
+            implements.target.span.clone(),
+        );
+        self.resolve_generic_parameters(implements.generic_parameters, scope);
+        self.resolve_type_info(implements.interface, scope);
+        self.resolve_type_info(implements.target, scope);
+        if let Some(where_clause) = implements.where_clause {
+            self.resolve_where_clause(where_clause, scope);
+        }
+        for method in implements.methods {
+            self.collect_function(method, scope);
+        }
+        for method in implements.methods {
+            self.resolve_function(method, scope, imports);
+        }
+    }
+
+    fn resolve_generic_parameters(
+        &mut self,
+        parameters: Option<&'ast GenericParameters<'input, 'allocator>>,
+        scope: ScopeId,
+    ) {
+        let Some(parameters) = parameters else {
+            return;
+        };
+
+        for parameter in parameters.parameters {
+            let name = self.names.intern(parameter.name.value);
+            let id = self.allocate_generic_parameter(
+                name,
+                AstId::new(&parameter.name, AstKind::Literal),
+                parameter.span.clone(),
+            );
+            self.define(
+                scope,
+                Namespace::Type,
+                name,
+                Res::GenericParameter(id),
+                Some(parameter.name.span.clone()),
+                parameter.name.span.clone(),
+            );
+        }
+        for parameter in parameters.parameters {
+            for bound in parameter.bounds {
+                self.resolve_type_info(bound, scope);
+            }
+        }
+    }
+
+    fn resolve_where_clause(
+        &mut self,
+        where_clause: &'ast WhereClause<'input, 'allocator>,
+        scope: ScopeId,
+    ) {
+        for predicate in where_clause.predicates {
+            self.resolve_type_info(predicate.ty, scope);
+            for bound in predicate.bounds {
+                self.resolve_type_info(bound, scope);
+            }
+        }
+    }
+
+    fn define_this_parameter(
+        &mut self,
+        scope: ScopeId,
+        declaration: AstId<'ast>,
+        span: Range<usize>,
+    ) {
+        let name = self.names.intern("This");
+        let id = self.allocate_generic_parameter(name, declaration, span.clone());
+        self.define(
+            scope,
+            Namespace::Type,
+            name,
+            Res::GenericParameter(id),
+            None,
+            span,
+        );
+    }
+
     fn resolve_function(
         &mut self,
         function: &'ast FunctionDefine<'input, 'allocator>,
@@ -1017,8 +1215,27 @@ impl<'ast, 'input, 'allocator> CollectedModule<'ast, 'input, 'allocator> {
         imports: &ImportEnvironment,
     ) {
         let scope = self.new_scope(Some(parent), ScopeKind::Function);
+        self.resolve_generic_parameters(function.generic_parameters, scope);
         for argument in function.arguments.arguments {
             self.resolve_type_info(argument.type_info, scope);
+        }
+        if let Some(receiver) = &function.arguments.receiver {
+            let name = self.names.intern(receiver.value);
+            let id = self.allocate_symbol(
+                name,
+                SymbolKind::Parameter,
+                receiver,
+                receiver.span.clone(),
+                false,
+            );
+            self.define(
+                scope,
+                Namespace::Value,
+                name,
+                Res::Symbol(id),
+                Some(receiver.span.clone()),
+                receiver.span.clone(),
+            );
         }
         for argument in function.arguments.arguments {
             let name = self.names.intern(argument.name.value);
@@ -1040,6 +1257,9 @@ impl<'ast, 'input, 'allocator> CollectedModule<'ast, 'input, 'allocator> {
         }
         if let Some(return_type) = function.return_type {
             self.resolve_type_info(return_type, scope);
+        }
+        if let Some(where_clause) = function.where_clause {
+            self.resolve_where_clause(where_clause, scope);
         }
         self.resolve_block(function.body, scope, imports);
     }
@@ -1072,7 +1292,7 @@ impl<'ast, 'input, 'allocator> CollectedModule<'ast, 'input, 'allocator> {
         let resolution =
             self.resolve_name(scope, name, Namespace::Type, type_info.name.span.clone());
         self.record_reference(&type_info.name, resolution);
-        if let Some(parameter) = type_info.parameter {
+        for parameter in type_info.parameters {
             self.resolve_type_info(parameter, scope);
         }
     }
@@ -1201,6 +1421,7 @@ impl<'ast, 'input, 'allocator> CollectedModule<'ast, 'input, 'allocator> {
                     self.resolve_value_root(scope, name, literal.literal.span.clone())
                 };
                 self.record_reference(&literal.literal, resolution);
+                self.resolve_explicit_type_arguments(literal.type_arguments, scope);
                 if let Some(call) = literal.call {
                     self.resolve_call(call, scope, imports);
                 }
@@ -1235,6 +1456,7 @@ impl<'ast, 'input, 'allocator> CollectedModule<'ast, 'input, 'allocator> {
                 _ => Res::Member(name),
             };
             self.record_reference(&access.member, current);
+            self.resolve_explicit_type_arguments(access.type_arguments, scope);
             if let Some(call) = access.call {
                 self.resolve_call(call, scope, imports);
             }
@@ -1253,6 +1475,7 @@ impl<'ast, 'input, 'allocator> CollectedModule<'ast, 'input, 'allocator> {
                 let name = self.names.intern(literal.literal.value);
                 let resolution = self.resolve_value_root(scope, name, literal.literal.span.clone());
                 self.record_reference(&literal.literal, resolution);
+                self.resolve_explicit_type_arguments(literal.type_arguments, scope);
                 if let Some(call) = literal.call {
                     self.resolve_call(call, scope, imports);
                 }
@@ -1285,6 +1508,21 @@ impl<'ast, 'input, 'allocator> CollectedModule<'ast, 'input, 'allocator> {
     ) {
         for argument in call.arguments {
             self.resolve_expression(argument, scope, imports);
+        }
+    }
+
+    fn resolve_explicit_type_arguments(
+        &mut self,
+        arguments: Option<&'ast light_nix_parser::ast::ExplicitTypeArguments<'input, 'allocator>>,
+        scope: ScopeId,
+    ) {
+        let Some(arguments) = arguments else {
+            return;
+        };
+        for argument in arguments.arguments {
+            if let ExplicitTypeArgument::Type(ty) = argument {
+                self.resolve_type_info(ty, scope);
+            }
         }
     }
 
@@ -1689,5 +1927,66 @@ let value = Missing
             resolution.resolve_literal(literal_from_expression(value.value.unwrap())),
             Some(Res::Error)
         );
+    }
+
+    #[test]
+    fn resolves_generic_interface_scopes_and_explicit_type_arguments() {
+        let source = r#"
+interface Comparable {}
+interface TestInterface<U> {}
+type Test {}
+
+implements TestInterface<Int> for Test {}
+
+inline function test<T, U>() -> U
+where T: TestInterface<U> {
+    let value: U
+    return value
+}
+
+let result = test:<Test>()
+"#;
+        let arena = AstArena::new();
+        let mut lexer = Lexer::new(source);
+        let mut parse_errors = ParseErrors::new_in(&arena);
+        let ast = parse_source(&mut lexer, &mut parse_errors, &arena);
+        assert!(parse_errors.is_empty(), "parse errors: {parse_errors:#?}");
+
+        let resolution = collect_module(ast, ModuleId(0)).resolve(&ImportEnvironment::default());
+        assert!(resolution.errors().is_empty(), "{:#?}", resolution.errors());
+        assert_eq!(
+            resolution
+                .types()
+                .iter()
+                .filter(|ty| ty.kind == TypeDefKind::Interface)
+                .count(),
+            2
+        );
+
+        let Statement::FunctionDefine(function) = ast.statements[4] else {
+            panic!("expected generic function");
+        };
+        assert!(matches!(
+            resolution.resolve_literal(&function.return_type.unwrap().name),
+            Some(Res::GenericParameter(_))
+        ));
+
+        let Statement::LetStatement(result) = ast.statements[5] else {
+            panic!("expected result");
+        };
+        let Expression::Primary(call) = result.value.unwrap() else {
+            panic!("expected generic call");
+        };
+        let Value::Literal(call) = &call.value else {
+            panic!("expected literal call");
+        };
+        let ExplicitTypeArgument::Type(test_type) = &call.type_arguments.unwrap().arguments[0]
+        else {
+            panic!("expected explicit Test type");
+        };
+        assert!(matches!(
+            resolution.resolve_literal(&test_type.name),
+            Some(Res::Type(_))
+        ));
     }
 }

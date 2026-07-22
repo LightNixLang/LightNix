@@ -32,10 +32,13 @@ pub enum AstKind {
     EnumDefine,
     EnumVariant,
     TypeDefine,
+    InterfaceDefine,
+    ImplementsDefine,
     TypeBlock,
     Field,
     LetStatement,
     FunctionDefine,
     FunctionArgument,
+    GenericParameter,
     Pattern,
 }
