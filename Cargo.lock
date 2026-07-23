@@ -104,6 +104,7 @@ name = "light-nix"
 version = "0.1.0"
 dependencies = [
  "light-nix-dependency-graph",
+ "light-nix-evaluator",
  "light-nix-name-resolver",
  "light-nix-parser",
  "light-nix-type-checker",
@@ -111,6 +112,15 @@ dependencies = [
 
 [[package]]
 name = "light-nix-dependency-graph"
+version = "0.1.0"
+dependencies = [
+ "light-nix-name-resolver",
+ "light-nix-parser",
+ "light-nix-type-checker",
+]
+
+[[package]]
+name = "light-nix-evaluator"
 version = "0.1.0"
 dependencies = [
  "light-nix-name-resolver",
