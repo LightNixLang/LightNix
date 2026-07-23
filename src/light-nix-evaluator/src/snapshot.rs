@@ -1,34 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use light_nix_name_resolver::{FieldId, ModuleId, SymbolId};
+use light_nix_ir::{OutputPath, SourceOrigin};
+use light_nix_name_resolver::SymbolId;
 
 use crate::RuntimeValue;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct OutputPath {
-    pub root: SymbolId,
-    pub fields: Vec<FieldId>,
-}
-
-impl OutputPath {
-    pub fn root(root: SymbolId) -> Self {
-        Self {
-            root,
-            fields: Vec::new(),
-        }
-    }
-
-    pub fn field(mut self, field: FieldId) -> Self {
-        self.fields.push(field);
-        self
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceOrigin {
-    pub module: ModuleId,
-    pub span: std::ops::Range<usize>,
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutputEntry {

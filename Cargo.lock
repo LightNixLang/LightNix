@@ -105,6 +105,7 @@ version = "0.1.0"
 dependencies = [
  "light-nix-dependency-graph",
  "light-nix-evaluator",
+ "light-nix-ir",
  "light-nix-name-resolver",
  "light-nix-parser",
  "light-nix-type-checker",
@@ -123,6 +124,7 @@ dependencies = [
 name = "light-nix-evaluator"
 version = "0.1.0"
 dependencies = [
+ "light-nix-ir",
  "light-nix-name-resolver",
  "light-nix-parser",
  "light-nix-type-checker",
@@ -133,6 +135,15 @@ name = "light-nix-grammar"
 version = "0.1.0"
 dependencies = [
  "bnf_rules",
+]
+
+[[package]]
+name = "light-nix-ir"
+version = "0.1.0"
+dependencies = [
+ "light-nix-name-resolver",
+ "light-nix-parser",
+ "light-nix-type-checker",
 ]
 
 [[package]]

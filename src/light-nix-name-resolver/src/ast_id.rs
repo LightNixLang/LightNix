@@ -42,5 +42,7 @@ pub enum AstKind {
     GenericParameter,
     Pattern,
     Expression,
+    Value,
+    PrimaryAccess,
     TypeInfo,
 }

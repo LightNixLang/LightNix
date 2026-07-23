@@ -109,6 +109,8 @@ impl TypeEnvironment {
 #[derive(Debug)]
 pub struct TypeCheckResult<'ast> {
     expression_types: HashMap<AstId<'ast>, Type>,
+    value_types: HashMap<AstId<'ast>, Type>,
+    member_types: HashMap<AstId<'ast>, Type>,
     type_info_types: HashMap<AstId<'ast>, Type>,
     member_resolutions: HashMap<AstId<'ast>, MemberResolution>,
     symbol_types: HashMap<SymbolId, TypeScheme>,
@@ -140,6 +142,21 @@ impl<'ast> TypeCheckResult<'ast> {
             .get(&AstId::new(expression, AstKind::Expression))
     }
 
+    pub fn value_type<'input, 'allocator>(
+        &self,
+        value: &'ast Value<'input, 'allocator>,
+    ) -> Option<&Type> {
+        self.value_types.get(&AstId::new(value, AstKind::Value))
+    }
+
+    pub fn member_type<'input, 'allocator>(
+        &self,
+        access: &'ast PrimaryAccess<'input, 'allocator>,
+    ) -> Option<&Type> {
+        self.member_types
+            .get(&AstId::new(access, AstKind::PrimaryAccess))
+    }
+
     pub fn type_info_type<'input, 'allocator>(
         &self,
         type_info: &'ast TypeInfo<'input, 'allocator>,
@@ -162,6 +179,10 @@ impl<'ast> TypeCheckResult<'ast> {
 
     pub fn field_type(&self, field: FieldId) -> Option<&Type> {
         self.field_types.get(&field)
+    }
+
+    pub fn type_parameters(&self, ty: TypeDefId) -> &[GenericParameterId] {
+        self.type_parameters.get(&ty).map_or(&[], Vec::as_slice)
     }
 
     pub fn type_environment(&self) -> TypeEnvironment {
@@ -255,6 +276,8 @@ struct Checker<'ast, 'input, 'allocator, 'environment> {
     environment: &'environment TypeEnvironment,
     unifier: Unifier,
     expression_types: HashMap<AstId<'ast>, Type>,
+    value_types: HashMap<AstId<'ast>, Type>,
+    member_types: HashMap<AstId<'ast>, Type>,
     type_info_types: HashMap<AstId<'ast>, Type>,
     member_resolutions: HashMap<AstId<'ast>, MemberResolution>,
     symbol_types: HashMap<SymbolId, TypeScheme>,
@@ -303,6 +326,8 @@ impl<'ast, 'input, 'allocator, 'environment> Checker<'ast, 'input, 'allocator, '
             environment,
             unifier: Unifier::default(),
             expression_types: HashMap::new(),
+            value_types: HashMap::new(),
+            member_types: HashMap::new(),
             type_info_types: HashMap::new(),
             member_resolutions: HashMap::new(),
             symbol_types,
@@ -336,6 +361,12 @@ impl<'ast, 'input, 'allocator, 'environment> Checker<'ast, 'input, 'allocator, '
 
     fn finish(mut self) -> TypeCheckResult<'ast> {
         for ty in self.expression_types.values_mut() {
+            *ty = self.unifier.resolve(ty);
+        }
+        for ty in self.value_types.values_mut() {
+            *ty = self.unifier.resolve(ty);
+        }
+        for ty in self.member_types.values_mut() {
             *ty = self.unifier.resolve(ty);
         }
         for ty in self.type_info_types.values_mut() {
@@ -372,6 +403,8 @@ impl<'ast, 'input, 'allocator, 'environment> Checker<'ast, 'input, 'allocator, '
         }
         TypeCheckResult {
             expression_types: self.expression_types,
+            value_types: self.value_types,
+            member_types: self.member_types,
             type_info_types: self.type_info_types,
             member_resolutions: self.member_resolutions,
             symbol_types: self.symbol_types,
@@ -1182,8 +1215,16 @@ impl<'ast, 'input, 'allocator, 'environment> Checker<'ast, 'input, 'allocator, '
 
     fn infer_primary(&mut self, primary: &'ast Primary<'input, 'allocator>) -> Type {
         let mut state = self.infer_primary_root(&primary.value);
+        if let PrimaryState::Value(ty) = &state {
+            self.value_types
+                .insert(AstId::new(&primary.value, AstKind::Value), ty.clone());
+        }
         for access in primary.accesses {
             state = self.infer_access(state, access);
+            if let PrimaryState::Value(ty) = &state {
+                self.member_types
+                    .insert(AstId::new(access, AstKind::PrimaryAccess), ty.clone());
+            }
         }
         match state {
             PrimaryState::Value(ty) => ty,
