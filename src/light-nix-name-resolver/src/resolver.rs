@@ -1,10 +1,11 @@
 use std::{collections::HashMap, ops::Range};
 
 use light_nix_parser::ast::{
-    AccessOperator, Array, Block, ElseBranchValue, EnumDefine, ExplicitTypeArgument, Expression,
-    FunctionCall, FunctionDefine, GenericParameters, ImplementsDefine, ImportKind, InterfaceDefine,
-    LetStatement, Literal, MatchArm, Pattern, Primary, Source, Statement, Statements, TypeDefine,
-    TypeInfo, TypedefBlock, TypedefValue, Value, WhereClause,
+    AccessOperator, Array, Block, ClosureBody, ClosureExpression, ElseBranchValue, EnumDefine,
+    ExplicitTypeArgument, Expression, FunctionCall, FunctionDefine, GenericParameters,
+    ImplementsDefine, ImportKind, InterfaceDefine, LetStatement, Literal, MatchArm, Pattern,
+    Primary, Source, Statement, Statements, TypeDefine, TypeInfo, TypedefBlock, TypedefValue,
+    Value, WhereClause,
 };
 
 use crate::{
@@ -169,6 +170,7 @@ pub enum ScopeKind {
     Block,
     TypeDefinition,
     Function,
+    Closure,
     MatchArm,
     Interface,
     Implements,
@@ -1345,6 +1347,7 @@ impl<'ast, 'input, 'allocator> CollectedModule<'ast, 'input, 'allocator> {
                     self.resolve_expression(message, scope, imports);
                 }
             }
+            Expression::Closure(node) => self.resolve_closure(node, scope, imports),
             Expression::Elvis(node) => {
                 self.resolve_expression(node.optional, scope, imports);
                 self.resolve_expression(node.fallback, scope, imports);
@@ -1357,6 +1360,45 @@ impl<'ast, 'input, 'allocator> CollectedModule<'ast, 'input, 'allocator> {
                 self.resolve_expression(node.operand, scope, imports);
             }
             Expression::Primary(node) => self.resolve_primary(node, scope, imports),
+        }
+    }
+
+    fn resolve_closure(
+        &mut self,
+        closure: &'ast ClosureExpression<'input, 'allocator>,
+        parent: ScopeId,
+        imports: &ImportEnvironment,
+    ) {
+        let scope = self.new_scope(Some(parent), ScopeKind::Closure);
+        for parameter in closure.parameters {
+            if let Some(type_info) = parameter.type_info {
+                self.resolve_type_info(type_info, scope);
+            }
+            let name = self.names.intern(parameter.name.value);
+            let id = self.allocate_symbol(
+                name,
+                SymbolKind::Parameter,
+                &parameter.name,
+                parameter.span.clone(),
+                false,
+            );
+            self.define(
+                scope,
+                Namespace::Value,
+                name,
+                Res::Symbol(id),
+                Some(parameter.name.span.clone()),
+                parameter.name.span.clone(),
+            );
+        }
+        if let Some(return_type) = closure.return_type {
+            self.resolve_type_info(return_type, scope);
+        }
+        match closure.body {
+            ClosureBody::Expression(expression) => {
+                self.resolve_expression(expression, scope, imports);
+            }
+            ClosureBody::Block(block) => self.resolve_block(block, scope, imports),
         }
     }
 

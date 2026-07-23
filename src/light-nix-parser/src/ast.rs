@@ -367,6 +367,7 @@ pub enum Expression<'input, 'allocator> {
     Match(&'allocator MatchExpression<'input, 'allocator>),
     Return(&'allocator ReturnExpression<'input, 'allocator>),
     Throw(&'allocator ThrowExpression<'input, 'allocator>),
+    Closure(&'allocator ClosureExpression<'input, 'allocator>),
     Elvis(&'allocator ElvisExpression<'input, 'allocator>),
     Binary(&'allocator BinaryExpression<'input, 'allocator>),
     Unary(&'allocator UnaryExpression<'input, 'allocator>),
@@ -380,10 +381,46 @@ impl AST for Expression<'_, '_> {
             Self::Match(node) => node.span(),
             Self::Return(node) => node.span(),
             Self::Throw(node) => node.span(),
+            Self::Closure(node) => node.span(),
             Self::Elvis(node) => node.span(),
             Self::Binary(node) => node.span(),
             Self::Unary(node) => node.span(),
             Self::Primary(node) => node.span(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ClosureExpression<'input, 'allocator> {
+    pub attribute: Spanned<FunctionAttribute>,
+    pub parameters: &'allocator [ClosureParameter<'input, 'allocator>],
+    pub return_type: Option<&'allocator TypeInfo<'input, 'allocator>>,
+    pub body: ClosureBody<'input, 'allocator>,
+    pub span: Range<usize>,
+}
+
+impl_ast!(impl<'input, 'allocator> for ClosureExpression<'input, 'allocator>);
+
+#[derive(Debug)]
+pub struct ClosureParameter<'input, 'allocator> {
+    pub name: Literal<'input>,
+    pub type_info: Option<&'allocator TypeInfo<'input, 'allocator>>,
+    pub span: Range<usize>,
+}
+
+impl_ast!(impl<'input, 'allocator> for ClosureParameter<'input, 'allocator>);
+
+#[derive(Debug, Clone, Copy)]
+pub enum ClosureBody<'input, 'allocator> {
+    Expression(&'allocator Expression<'input, 'allocator>),
+    Block(&'allocator Block<'input, 'allocator>),
+}
+
+impl AST for ClosureBody<'_, '_> {
+    fn span(&self) -> Range<usize> {
+        match self {
+            Self::Expression(node) => node.span(),
+            Self::Block(node) => node.span(),
         }
     }
 }

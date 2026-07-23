@@ -15,6 +15,7 @@ pub enum RuntimeValue {
     Record(RuntimeRecord),
     Enum(VariantId),
     Function(SymbolId),
+    Closure(u32),
     Type(TypeDefId),
     Module(ModuleId),
 }
@@ -38,6 +39,7 @@ impl PartialEq for RuntimeValue {
             (Self::Record(left), Self::Record(right)) => left == right,
             (Self::Enum(left), Self::Enum(right)) => left == right,
             (Self::Function(left), Self::Function(right)) => left == right,
+            (Self::Closure(left), Self::Closure(right)) => left == right,
             (Self::Type(left), Self::Type(right)) => left == right,
             (Self::Module(left), Self::Module(right)) => left == right,
             _ => false,

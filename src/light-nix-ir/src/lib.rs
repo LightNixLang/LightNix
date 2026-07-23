@@ -12,9 +12,9 @@ pub use builder::ModelBuilder;
 pub use error::{BuildError, BuildErrorKind, LowerError, LowerErrorKind};
 pub use lower::{LowerResult, lower_module};
 pub use model::{
-    BinaryOperation, CallTarget, Constant, Constraint, ConstraintId, ConstraintKind,
-    ConstraintModel, Expression, ExpressionId, ExpressionKind, MutationPolicy, Objective,
-    ObjectiveId, ObjectiveKind, OutputCase, OutputDefinition, OutputPath, PathDeclaration,
-    SourceOrigin, UnaryOperation, Variable, VariableId, VariableKind, VariableSource,
-    WeightedVariable,
+    BinaryOperation, CallTarget, ClosureParameter, Constant, Constraint, ConstraintId,
+    ConstraintKind, ConstraintModel, Expression, ExpressionId, ExpressionKind, FunctionMode,
+    MutationPolicy, Objective, ObjectiveId, ObjectiveKind, OutputCase, OutputDefinition,
+    OutputPath, PathDeclaration, SourceOrigin, UnaryOperation, Variable, VariableId, VariableKind,
+    VariableSource, WeightedVariable,
 };

@@ -4,9 +4,10 @@ use light_nix_name_resolver::{
     Declaration, ModuleId, NameResolution, Res, SymbolId, SymbolKind, VariantId,
 };
 use light_nix_parser::ast::{
-    AST, AccessOperator, Array, BinaryOperator, Block, ElseBranchValue, Expression, FunctionCall,
-    FunctionDefine, LetStatement, Literal, MatchArm, MutationPolicyKind, Pattern, Primary,
-    PrimaryAccess, Source, Statement, Statements, UnaryOperator, Value,
+    AST, AccessOperator, Array, BinaryOperator, Block, ClosureBody, ClosureExpression,
+    ElseBranchValue, Expression, FunctionAttribute, FunctionCall, FunctionDefine, LetStatement,
+    Literal, MatchArm, MutationPolicyKind, Pattern, Primary, PrimaryAccess, Source, Statement,
+    Statements, UnaryOperator, Value,
 };
 use light_nix_type_checker::{BuiltinMethod, MemberResolution, Type, TypeCheckResult};
 
@@ -85,6 +86,7 @@ pub fn evaluate_module<'ast, 'input, 'allocator>(
 struct TrackedValue {
     value: RuntimeValue,
     dependencies: BTreeSet<SymbolId>,
+    opaque_dependencies: BTreeSet<SymbolId>,
     path: Option<OutputPath>,
 }
 
@@ -93,6 +95,7 @@ impl TrackedValue {
         Self {
             value,
             dependencies: BTreeSet::new(),
+            opaque_dependencies: BTreeSet::new(),
             path: None,
         }
     }
@@ -107,8 +110,14 @@ impl TrackedValue {
     }
 }
 
+#[derive(Clone)]
+struct ClosureInstance<'ast, 'input, 'allocator> {
+    expression: &'ast ClosureExpression<'input, 'allocator>,
+    captures: HashMap<SymbolId, TrackedValue>,
+}
+
 enum Signal {
-    Return(TrackedValue),
+    Return(Box<TrackedValue>),
     Error,
 }
 
@@ -121,12 +130,14 @@ struct Evaluator<'ast, 'input, 'allocator, 'inputs> {
     module: ModuleId,
     top_level_lets: HashMap<SymbolId, &'ast LetStatement<'input, 'allocator>>,
     functions: HashMap<SymbolId, &'ast FunctionDefine<'input, 'allocator>>,
+    closures: Vec<ClosureInstance<'ast, 'input, 'allocator>>,
     variants: HashMap<VariantId, Option<&'ast Expression<'input, 'allocator>>>,
     global_values: HashMap<SymbolId, TrackedValue>,
     frames: Vec<HashMap<SymbolId, TrackedValue>>,
     evaluating_values: HashSet<SymbolId>,
     calling_functions: HashSet<SymbolId>,
     control_dependencies: BTreeSet<SymbolId>,
+    control_opaque_dependencies: BTreeSet<SymbolId>,
     snapshot: EvaluationSnapshot,
     tunables: HashMap<SymbolId, TunableValue>,
     errors: Vec<EvaluationError>,
@@ -145,12 +156,14 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
             module: resolution.module(),
             top_level_lets: HashMap::new(),
             functions: HashMap::new(),
+            closures: Vec::new(),
             variants: HashMap::new(),
             global_values: HashMap::new(),
             frames: Vec::new(),
             evaluating_values: HashSet::new(),
             calling_functions: HashSet::new(),
             control_dependencies: BTreeSet::new(),
+            control_opaque_dependencies: BTreeSet::new(),
             snapshot: EvaluationSnapshot::default(),
             tunables: HashMap::new(),
             errors: Vec::new(),
@@ -319,9 +332,13 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
                 value
                     .dependencies
                     .extend(self.control_dependencies.iter().copied());
+                value
+                    .opaque_dependencies
+                    .extend(self.control_opaque_dependencies.iter().copied());
                 let entry = OutputEntry {
                     value: value.value.clone(),
                     dependencies: value.dependencies.clone(),
+                    opaque_dependencies: value.opaque_dependencies.clone(),
                     origin: SourceOrigin {
                         module: self.module,
                         span: node.span.clone(),
@@ -355,28 +372,36 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
         match expression {
             Expression::If(node) => {
                 let mut guards = BTreeSet::new();
+                let mut opaque_guards = BTreeSet::new();
                 let condition = self.eval_expression(node.branch.condition)?;
                 guards.extend(condition.dependencies.iter().copied());
+                opaque_guards.extend(condition.opaque_dependencies.iter().copied());
                 if self.expect_bool(condition, node.branch.condition.span())? {
-                    return self.eval_controlled_block(node.branch.body, &guards);
+                    return self.eval_controlled_block(node.branch.body, &guards, &opaque_guards);
                 }
                 for branch in node.else_branches {
                     match branch.value {
                         ElseBranchValue::If(branch) => {
                             let condition = self.eval_expression(branch.condition)?;
                             guards.extend(condition.dependencies.iter().copied());
+                            opaque_guards.extend(condition.opaque_dependencies.iter().copied());
                             if self.expect_bool(condition, branch.condition.span())? {
-                                return self.eval_controlled_block(branch.body, &guards);
+                                return self.eval_controlled_block(
+                                    branch.body,
+                                    &guards,
+                                    &opaque_guards,
+                                );
                             }
                         }
                         ElseBranchValue::Block(block) => {
-                            return self.eval_controlled_block(block, &guards);
+                            return self.eval_controlled_block(block, &guards, &opaque_guards);
                         }
                     }
                 }
                 Ok(TrackedValue {
                     value: RuntimeValue::Unit,
                     dependencies: guards,
+                    opaque_dependencies: BTreeSet::new(),
                     path: None,
                 })
             }
@@ -384,7 +409,12 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
                 let matched = self.eval_expression(node.value)?;
                 for arm in node.arms {
                     if let Some(bindings) = self.match_pattern(&arm.pattern, &matched) {
-                        return self.eval_match_arm(arm, bindings, &matched.dependencies);
+                        return self.eval_match_arm(
+                            arm,
+                            bindings,
+                            &matched.dependencies,
+                            &matched.opaque_dependencies,
+                        );
                     }
                 }
                 self.fail(EvaluationErrorKind::NoMatchingPattern, node.span.clone())
@@ -397,7 +427,10 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
                 value
                     .dependencies
                     .extend(self.control_dependencies.iter().copied());
-                Err(Signal::Return(value))
+                value
+                    .opaque_dependencies
+                    .extend(self.control_opaque_dependencies.iter().copied());
+                Err(Signal::Return(Box::new(value)))
             }
             Expression::Throw(node) => {
                 let message = match node.message {
@@ -409,12 +442,14 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
                 };
                 self.fail(EvaluationErrorKind::Thrown { message }, node.span.clone())
             }
+            Expression::Closure(node) => self.eval_closure(node),
             Expression::Elvis(node) => {
                 let optional = self.eval_expression(node.optional)?;
                 match optional.value {
                     RuntimeValue::Optional(Some(value)) => Ok(TrackedValue {
                         value: *value,
                         dependencies: optional.dependencies,
+                        opaque_dependencies: optional.opaque_dependencies,
                         path: optional.path,
                     }),
                     RuntimeValue::Optional(None) => {
@@ -461,18 +496,42 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
         }
     }
 
+    fn eval_closure(
+        &mut self,
+        expression: &'ast ClosureExpression<'input, 'allocator>,
+    ) -> Eval<TrackedValue> {
+        let mut captures = HashMap::new();
+        for frame in &self.frames {
+            captures.extend(frame.iter().map(|(symbol, value)| (*symbol, value.clone())));
+        }
+        let id = u32::try_from(self.closures.len()).map_err(|_| Signal::Error)?;
+        self.closures.push(ClosureInstance {
+            expression,
+            captures,
+        });
+        Ok(TrackedValue::pure(RuntimeValue::Closure(id)))
+    }
+
     fn eval_controlled_block(
         &mut self,
         block: &'ast Block<'input, 'allocator>,
         dependencies: &BTreeSet<SymbolId>,
+        opaque_dependencies: &BTreeSet<SymbolId>,
     ) -> Eval<TrackedValue> {
         let previous = self.control_dependencies.clone();
+        let previous_opaque = self.control_opaque_dependencies.clone();
         self.control_dependencies
             .extend(dependencies.iter().copied());
+        self.control_opaque_dependencies
+            .extend(opaque_dependencies.iter().copied());
         let result = self.eval_block(block);
         self.control_dependencies = previous;
+        self.control_opaque_dependencies = previous_opaque;
         result.map(|mut value| {
             value.dependencies.extend(dependencies.iter().copied());
+            value
+                .opaque_dependencies
+                .extend(opaque_dependencies.iter().copied());
             value
         })
     }
@@ -482,16 +541,24 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
         arm: &'ast MatchArm<'input, 'allocator>,
         bindings: Vec<(SymbolId, TrackedValue)>,
         dependencies: &BTreeSet<SymbolId>,
+        opaque_dependencies: &BTreeSet<SymbolId>,
     ) -> Eval<TrackedValue> {
         let previous_control = self.control_dependencies.clone();
+        let previous_opaque = self.control_opaque_dependencies.clone();
         self.control_dependencies
             .extend(dependencies.iter().copied());
+        self.control_opaque_dependencies
+            .extend(opaque_dependencies.iter().copied());
         self.frames.push(bindings.into_iter().collect());
         let result = self.eval_expression(arm.value);
         self.frames.pop();
         self.control_dependencies = previous_control;
+        self.control_opaque_dependencies = previous_opaque;
         result.map(|mut value| {
             value.dependencies.extend(dependencies.iter().copied());
+            value
+                .opaque_dependencies
+                .extend(opaque_dependencies.iter().copied());
             value
         })
     }
@@ -507,6 +574,7 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
             return Ok(TrackedValue {
                 value: RuntimeValue::Bool(false),
                 dependencies: left.dependencies,
+                opaque_dependencies: left.opaque_dependencies,
                 path: None,
             });
         }
@@ -516,6 +584,7 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
             return Ok(TrackedValue {
                 value: RuntimeValue::Bool(true),
                 dependencies: left.dependencies,
+                opaque_dependencies: left.opaque_dependencies,
                 path: None,
             });
         }
@@ -616,6 +685,7 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
                 Ok(TrackedValue {
                     value: RuntimeValue::optional(Some(value.value)),
                     dependencies: value.dependencies,
+                    opaque_dependencies: value.opaque_dependencies,
                     path: None,
                 })
             }
@@ -649,9 +719,11 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
     fn eval_array(&mut self, array: &'ast Array<'input, 'allocator>) -> Eval<TrackedValue> {
         let mut values = Vec::new();
         let mut dependencies = BTreeSet::new();
+        let mut opaque_dependencies = BTreeSet::new();
         for value in array.values {
             let value = self.eval_value(value)?;
             dependencies.extend(value.dependencies);
+            opaque_dependencies.extend(value.opaque_dependencies);
             if !values.contains(&value.value) {
                 values.push(value.value);
             }
@@ -659,6 +731,7 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
         Ok(TrackedValue {
             value: RuntimeValue::Set(values),
             dependencies,
+            opaque_dependencies,
             path: None,
         })
     }
@@ -673,12 +746,14 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
                 RuntimeValue::Optional(None) => Ok(TrackedValue {
                     value: RuntimeValue::optional(None),
                     dependencies: receiver.dependencies,
+                    opaque_dependencies: receiver.opaque_dependencies,
                     path: None,
                 }),
                 RuntimeValue::Optional(Some(value)) => {
                     let inner = TrackedValue {
                         value: *value,
                         dependencies: receiver.dependencies,
+                        opaque_dependencies: receiver.opaque_dependencies,
                         path: receiver.path,
                     };
                     let value = self.eval_regular_access(inner, access)?;
@@ -687,6 +762,7 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
                         other => TrackedValue {
                             value: RuntimeValue::optional(Some(other)),
                             dependencies: value.dependencies,
+                            opaque_dependencies: value.opaque_dependencies,
                             path: None,
                         },
                     })
@@ -761,9 +837,12 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
         if let Some(entry) = path.as_ref().and_then(|path| self.snapshot.get(path)) {
             let mut dependencies = receiver.dependencies;
             dependencies.extend(entry.dependencies.iter().copied());
+            let mut opaque_dependencies = receiver.opaque_dependencies;
+            opaque_dependencies.extend(entry.opaque_dependencies.iter().copied());
             return Ok(TrackedValue {
                 value: entry.value.clone(),
                 dependencies,
+                opaque_dependencies,
                 path,
             });
         }
@@ -790,6 +869,7 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
         Ok(TrackedValue {
             value,
             dependencies: receiver.dependencies,
+            opaque_dependencies: receiver.opaque_dependencies,
             path,
         })
     }
@@ -799,24 +879,110 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
         callee: TrackedValue,
         receiver: Option<TrackedValue>,
         call: &'ast FunctionCall<'input, 'allocator>,
-        span: std::ops::Range<usize>,
+        _span: std::ops::Range<usize>,
     ) -> Eval<TrackedValue> {
-        let RuntimeValue::Function(symbol) = callee.value else {
-            return self.fail(
-                EvaluationErrorKind::NotCallable {
-                    found: callee.value,
-                },
-                span,
-            );
-        };
         let mut arguments = Vec::with_capacity(call.arguments.len());
         for argument in call.arguments {
             arguments.push(self.eval_expression(argument)?.without_path());
         }
-        let mut result = self.call_function(symbol, receiver, arguments, call.span.clone())?;
-        result.dependencies.extend(callee.dependencies);
+        let mut result = self.call_callable(callee, receiver, arguments, call.span.clone())?;
         result.path = None;
         Ok(result)
+    }
+
+    fn call_callable(
+        &mut self,
+        callable: TrackedValue,
+        receiver: Option<TrackedValue>,
+        arguments: Vec<TrackedValue>,
+        span: std::ops::Range<usize>,
+    ) -> Eval<TrackedValue> {
+        let mut exact_inputs = callable.dependencies.clone();
+        let mut opaque_inputs = callable.opaque_dependencies.clone();
+        if let Some(receiver) = &receiver {
+            exact_inputs.extend(receiver.dependencies.iter().copied());
+            opaque_inputs.extend(receiver.opaque_dependencies.iter().copied());
+        }
+        for argument in &arguments {
+            exact_inputs.extend(argument.dependencies.iter().copied());
+            opaque_inputs.extend(argument.opaque_dependencies.iter().copied());
+        }
+        let (mut result, mode) = match callable.value {
+            RuntimeValue::Function(symbol) => {
+                let mode = self
+                    .functions
+                    .get(&symbol)
+                    .map(|function| function.attribute.value)
+                    .unwrap_or(FunctionAttribute::Opaque);
+                (self.call_function(symbol, receiver, arguments, span)?, mode)
+            }
+            RuntimeValue::Closure(id) => {
+                let expression = self
+                    .closures
+                    .get(id as usize)
+                    .map(|closure| closure.expression)
+                    .ok_or(Signal::Error)?;
+                (
+                    self.call_closure(id, arguments, span)?,
+                    expression.attribute.value,
+                )
+            }
+            found => {
+                return self.fail(EvaluationErrorKind::NotCallable { found }, span);
+            }
+        };
+        match mode {
+            FunctionAttribute::Inline => {
+                result.dependencies.extend(exact_inputs);
+                result.opaque_dependencies.extend(opaque_inputs);
+            }
+            FunctionAttribute::Opaque => {
+                result.opaque_dependencies.extend(opaque_inputs);
+                result.opaque_dependencies.extend(exact_inputs);
+                result
+                    .opaque_dependencies
+                    .extend(result.dependencies.iter().copied());
+                result.dependencies.clear();
+            }
+        }
+        Ok(result)
+    }
+
+    fn call_closure(
+        &mut self,
+        id: u32,
+        arguments: Vec<TrackedValue>,
+        span: std::ops::Range<usize>,
+    ) -> Eval<TrackedValue> {
+        let Some(closure) = self.closures.get(id as usize).cloned() else {
+            return Err(Signal::Error);
+        };
+        if arguments.len() != closure.expression.parameters.len() {
+            return self.fail(
+                EvaluationErrorKind::ArgumentCount {
+                    expected: closure.expression.parameters.len(),
+                    found: arguments.len(),
+                },
+                span,
+            );
+        }
+        let mut frame = closure.captures;
+        for (parameter, value) in closure.expression.parameters.iter().zip(arguments) {
+            if let Some(symbol) = self.symbol_declaration(&parameter.name) {
+                frame.insert(symbol, value);
+            }
+        }
+        self.frames.push(frame);
+        let result = match closure.expression.body {
+            ClosureBody::Expression(expression) => self.eval_expression(expression),
+            ClosureBody::Block(block) => match self.eval_block(block) {
+                Ok(value) => Ok(value),
+                Err(Signal::Return(value)) => Ok(*value),
+                Err(Signal::Error) => Err(Signal::Error),
+            },
+        };
+        self.frames.pop();
+        result
     }
 
     fn call_function(
@@ -855,7 +1021,8 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
         }
         self.frames.push(frame);
         let result = match self.eval_block(function.body) {
-            Ok(value) | Err(Signal::Return(value)) => Ok(value),
+            Ok(value) => Ok(value),
+            Err(Signal::Return(value)) => Ok(*value),
             Err(Signal::Error) => Err(Signal::Error),
         };
         self.frames.pop();
@@ -875,8 +1042,10 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
             arguments.push(self.eval_expression(argument)?.without_path());
         }
         let mut dependencies = receiver.dependencies.clone();
+        let mut opaque_dependencies = receiver.opaque_dependencies.clone();
         for argument in &arguments {
             dependencies.extend(argument.dependencies.iter().copied());
+            opaque_dependencies.extend(argument.opaque_dependencies.iter().copied());
         }
         let value = match method {
             BuiltinMethod::Contains => {
@@ -900,6 +1069,7 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
                     let argument = TrackedValue {
                         value: value.clone(),
                         dependencies: receiver.dependencies.clone(),
+                        opaque_dependencies: receiver.opaque_dependencies.clone(),
                         path: None,
                     };
                     let result = self.call_runtime_function(
@@ -908,6 +1078,7 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
                         span.clone(),
                     )?;
                     dependencies.extend(result.dependencies.iter().copied());
+                    opaque_dependencies.extend(result.opaque_dependencies.iter().copied());
                     if self.expect_bool(result, span.clone())? {
                         filtered.push(value);
                     }
@@ -926,11 +1097,13 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
                     let argument = TrackedValue {
                         value,
                         dependencies: receiver.dependencies.clone(),
+                        opaque_dependencies: receiver.opaque_dependencies.clone(),
                         path: None,
                     };
                     let result =
                         self.call_runtime_function(mapper.clone(), vec![argument], span.clone())?;
                     dependencies.extend(result.dependencies.iter().copied());
+                    opaque_dependencies.extend(result.opaque_dependencies.iter().copied());
                     if !mapped.contains(&result.value) {
                         mapped.push(result.value);
                     }
@@ -970,6 +1143,7 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
         Ok(TrackedValue {
             value,
             dependencies,
+            opaque_dependencies,
             path: None,
         })
     }
@@ -980,17 +1154,7 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
         arguments: Vec<TrackedValue>,
         span: std::ops::Range<usize>,
     ) -> Eval<TrackedValue> {
-        let RuntimeValue::Function(symbol) = function.value else {
-            return self.fail(
-                EvaluationErrorKind::NotCallable {
-                    found: function.value,
-                },
-                span,
-            );
-        };
-        let mut result = self.call_function(symbol, None, arguments, span)?;
-        result.dependencies.extend(function.dependencies);
-        Ok(result)
+        self.call_callable(function, None, arguments, span)
     }
 
     fn eval_symbol(
@@ -1106,6 +1270,7 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
         Ok(TrackedValue {
             value: RuntimeValue::Enum(variant),
             dependencies,
+            opaque_dependencies: BTreeSet::new(),
             path: None,
         })
     }
@@ -1125,6 +1290,7 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
                     &TrackedValue {
                         value: (**inner).clone(),
                         dependencies: value.dependencies.clone(),
+                        opaque_dependencies: value.opaque_dependencies.clone(),
                         path: None,
                     },
                 )
@@ -1229,9 +1395,12 @@ fn merge_tracked(
 ) -> TrackedValue {
     let mut dependencies = left.dependencies;
     dependencies.extend(right.dependencies);
+    let mut opaque_dependencies = left.opaque_dependencies;
+    opaque_dependencies.extend(right.opaque_dependencies);
     TrackedValue {
         value: merge(left.value, right.value),
         dependencies,
+        opaque_dependencies,
         path: None,
     }
 }
@@ -1243,9 +1412,12 @@ fn merge_tracked_result(
 ) -> Result<TrackedValue, EvaluationErrorKind> {
     let mut dependencies = left.dependencies;
     dependencies.extend(right.dependencies);
+    let mut opaque_dependencies = left.opaque_dependencies;
+    opaque_dependencies.extend(right.opaque_dependencies);
     Ok(TrackedValue {
         value: merge(left.value, right.value)?,
         dependencies,
+        opaque_dependencies,
         path: None,
     })
 }
@@ -1625,6 +1797,65 @@ programs.enabled = values.contains(n)
                 .map(|entry| (&entry.value, &entry.dependencies)),
             Some((&RuntimeValue::Bool(true), &BTreeSet::from([n])))
         );
+    }
+
+    #[test]
+    fn evaluates_closures_and_distinguishes_exact_from_opaque_dependencies() {
+        let source = r#"
+type Programs {
+    inline_values: Set<Int>
+    opaque_values: Set<Int>
+}
+let tunable threshold = 1
+let values = [1, 2, 3]
+let inline_values = values.filter(inline |value| => value > threshold)
+let opaque_values = values.filter(opaque |value: Int| -> Bool => {
+    return value > threshold
+})
+declare let programs: Programs
+programs.inline_values = inline_values
+programs.opaque_values = opaque_values
+"#;
+        let arena = AstArena::new();
+        let ast = parse(source, &arena);
+        let resolution = collect_module(ast, ModuleId(0)).resolve(&ImportEnvironment::default());
+        assert!(resolution.errors().is_empty(), "{:#?}", resolution.errors());
+        let types = check_module(ast, &resolution, &TypeEnvironment::default());
+        assert!(types.errors().is_empty(), "{:#?}", types.errors());
+        let result = evaluate_module(ast, &resolution, &types, &EvaluationInputs::default());
+        assert!(result.is_success(), "{:#?}", result.errors());
+
+        let Statement::TypeDefine(programs_type) = ast.statements[0] else {
+            panic!("expected Programs type");
+        };
+        let Statement::LetStatement(threshold_binding) = ast.statements[1] else {
+            panic!("expected threshold binding");
+        };
+        let Statement::LetStatement(programs_binding) = ast.statements[5] else {
+            panic!("expected programs binding");
+        };
+        let threshold = symbol_of(&resolution, &threshold_binding.name);
+        let programs = symbol_of(&resolution, &programs_binding.name);
+        let programs_type = type_of(&resolution, &programs_type.name);
+        let inline_values = field_named(&resolution, programs_type, "inline_values");
+        let opaque_values = field_named(&resolution, programs_type, "opaque_values");
+        let expected = RuntimeValue::Set(vec![RuntimeValue::Int(2), RuntimeValue::Int(3)]);
+
+        let inline = result
+            .snapshot()
+            .get(&OutputPath::root(programs).field(inline_values))
+            .expect("inline output");
+        assert_eq!(inline.value, expected);
+        assert_eq!(inline.dependencies, BTreeSet::from([threshold]));
+        assert!(inline.opaque_dependencies.is_empty());
+
+        let opaque = result
+            .snapshot()
+            .get(&OutputPath::root(programs).field(opaque_values))
+            .expect("opaque output");
+        assert_eq!(opaque.value, expected);
+        assert!(opaque.dependencies.is_empty());
+        assert_eq!(opaque.opaque_dependencies, BTreeSet::from([threshold]));
     }
 
     #[test]

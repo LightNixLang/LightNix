@@ -9,6 +9,7 @@ use crate::RuntimeValue;
 pub struct OutputEntry {
     pub value: RuntimeValue,
     pub dependencies: BTreeSet<SymbolId>,
+    pub opaque_dependencies: BTreeSet<SymbolId>,
     pub origin: SourceOrigin,
 }
 
@@ -44,11 +45,17 @@ impl EvaluationSnapshot {
                         .chain(after)
                         .flat_map(|entry| entry.dependencies.iter().copied())
                         .collect();
+                    let opaque_dependencies = before
+                        .into_iter()
+                        .chain(after)
+                        .flat_map(|entry| entry.opaque_dependencies.iter().copied())
+                        .collect();
                     OutputChange {
                         path,
                         before: before.cloned(),
                         after: after.cloned(),
                         dependencies,
+                        opaque_dependencies,
                     }
                 })
             })
@@ -70,4 +77,5 @@ pub struct OutputChange {
     pub before: Option<OutputEntry>,
     pub after: Option<OutputEntry>,
     pub dependencies: BTreeSet<SymbolId>,
+    pub opaque_dependencies: BTreeSet<SymbolId>,
 }

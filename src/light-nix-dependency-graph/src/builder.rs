@@ -2,8 +2,8 @@ use std::marker::PhantomData;
 
 use light_nix_name_resolver::{Declaration, NameResolution, Res, SymbolKind};
 use light_nix_parser::ast::{
-    AST, Array, ElseBranchValue, Expression, FunctionCall, FunctionDefine, Literal, MatchArm,
-    Pattern, Primary, Source, Statement, Statements, Value,
+    AST, Array, ClosureBody, ElseBranchValue, Expression, FunctionCall, FunctionDefine, Literal,
+    MatchArm, Pattern, Primary, Source, Statement, Statements, Value,
 };
 use light_nix_type_checker::{MemberResolution, TypeCheckResult};
 
@@ -204,6 +204,12 @@ impl<'ast, 'input, 'allocator> Builder<'ast, 'input, 'allocator> {
                     self.visit_expression(message);
                 }
             }
+            Expression::Closure(node) => match node.body {
+                ClosureBody::Expression(expression) => self.visit_expression(expression),
+                ClosureBody::Block(block) => {
+                    self.visit_statements(&block.statements, false);
+                }
+            },
             Expression::Elvis(node) => {
                 self.visit_expression(node.optional);
                 self.visit_expression(node.fallback);
@@ -562,6 +568,38 @@ let desktop = Desktop::KDE
         assert_eq!(
             graph.dependencies(desktop).collect::<Vec<_>>(),
             vec![variant]
+        );
+    }
+
+    #[test]
+    fn closure_parameters_are_local_while_captured_values_are_dependencies() {
+        let source = r#"
+let values = [1, 2, 3]
+let threshold = 1
+let filtered = values.filter(inline |value| => value > threshold)
+"#;
+        let arena = AstArena::new();
+        let ast = parse(source, &arena);
+        let resolution = collect_module(ast, ModuleId(0)).resolve(&ImportEnvironment::default());
+        assert!(resolution.errors().is_empty(), "{:#?}", resolution.errors());
+        let graph = build_dependency_graph(ast, &resolution);
+
+        let Statement::LetStatement(values) = ast.statements[0] else {
+            panic!("expected values binding");
+        };
+        let Statement::LetStatement(threshold) = ast.statements[1] else {
+            panic!("expected threshold binding");
+        };
+        let Statement::LetStatement(filtered) = ast.statements[2] else {
+            panic!("expected filtered binding");
+        };
+        let values = symbol_of(&resolution, &values.name);
+        let threshold = symbol_of(&resolution, &threshold.name);
+        let filtered = symbol_of(&resolution, &filtered.name);
+
+        assert_eq!(
+            graph.dependencies(filtered).collect::<HashSet<_>>(),
+            HashSet::from([values, threshold])
         );
     }
 

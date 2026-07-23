@@ -39,6 +39,8 @@ pub enum AstKind {
     LetStatement,
     FunctionDefine,
     FunctionArgument,
+    Closure,
+    ClosureParameter,
     GenericParameter,
     Pattern,
     Expression,

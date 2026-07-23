@@ -8,11 +8,11 @@ use light_nix_name_resolver::{
     SymbolId, SymbolKind, TypeDefId, TypeDefKind,
 };
 use light_nix_parser::ast::{
-    AST, AccessOperator, Array, BinaryOperator, ElseBranchValue, ExplicitTypeArgument,
-    ExplicitTypeArguments, Expression, FunctionCall, FunctionDefine, GenericParameters,
-    ImplementsDefine, InterfaceDefine, LetStatement, Pattern, Primary, PrimaryAccess, Source,
-    Statement, Statements, TypeDefine, TypeInfo, TypedefBlock, TypedefValue, UnaryOperator, Value,
-    WhereClause,
+    AST, AccessOperator, Array, BinaryOperator, ClosureBody, ClosureExpression, ElseBranchValue,
+    ExplicitTypeArgument, ExplicitTypeArguments, Expression, FunctionCall, FunctionDefine,
+    GenericParameters, ImplementsDefine, InterfaceDefine, LetStatement, Pattern, Primary,
+    PrimaryAccess, Source, Statement, Statements, TypeDefine, TypeInfo, TypedefBlock, TypedefValue,
+    UnaryOperator, Value, WhereClause,
 };
 
 use crate::{
@@ -1056,6 +1056,7 @@ impl<'ast, 'input, 'allocator, 'environment> Checker<'ast, 'input, 'allocator, '
                 }
                 Type::Never
             }
+            Expression::Closure(node) => self.infer_closure(node),
             Expression::Elvis(node) => {
                 let optional = self.infer_expression(node.optional);
                 let fallback = self.infer_expression(node.fallback);
@@ -1120,6 +1121,39 @@ impl<'ast, 'input, 'allocator, 'environment> Checker<'ast, 'input, 'allocator, '
         self.expression_types
             .insert(AstId::new(expression, AstKind::Expression), ty.clone());
         ty
+    }
+
+    fn infer_closure(&mut self, node: &'ast ClosureExpression<'input, 'allocator>) -> Type {
+        let parameters = node
+            .parameters
+            .iter()
+            .map(|parameter| {
+                let ty = parameter
+                    .type_info
+                    .map(|type_info| self.lower_type_info(type_info))
+                    .unwrap_or_else(|| self.unifier.fresh());
+                if let Some(symbol) = self.symbol_declaration(&parameter.name) {
+                    self.symbol_types
+                        .insert(symbol, TypeScheme::monomorphic(ty.clone()));
+                }
+                ty
+            })
+            .collect::<Vec<_>>();
+        let return_type = node
+            .return_type
+            .map(|type_info| self.lower_type_info(type_info))
+            .unwrap_or_else(|| self.unifier.fresh());
+        let old_return = self.current_return.replace(return_type.clone());
+        let body_type = match node.body {
+            ClosureBody::Expression(expression) => self.infer_expression(expression),
+            ClosureBody::Block(block) => {
+                self.predeclare_statements(&block.statements);
+                self.check_statements(&block.statements)
+            }
+        };
+        self.unify_at(&return_type, &body_type, node.body.span());
+        self.current_return = old_return;
+        Type::function(parameters, return_type)
     }
 
     fn infer_if(
@@ -2436,6 +2470,57 @@ let contained = values.contains(1)
             assert_eq!(
                 result.member_resolution(&mapped_value.accesses[0]),
                 Some(&MemberResolution::Builtin(BuiltinMethod::Map))
+            );
+        });
+    }
+
+    #[test]
+    fn infers_inline_and_opaque_closure_parameters_from_builtin_methods() {
+        let source = r#"
+let values = [1, 2]
+let threshold = 1
+let filtered = values.filter(inline |value| => value > threshold)
+let mapped = values.map(opaque |value: Int| -> String => {
+    return value.to_string()
+})
+"#;
+        check_source(source, |ast, resolution, result| {
+            assert!(result.errors().is_empty(), "{:#?}", result.errors());
+            let Statement::LetStatement(filtered) = ast.statements[2] else {
+                panic!("expected filtered binding");
+            };
+            let Statement::LetStatement(mapped) = ast.statements[3] else {
+                panic!("expected mapped binding");
+            };
+            assert_eq!(
+                result
+                    .symbol_type(symbol_of(resolution, &filtered.name))
+                    .unwrap()
+                    .ty,
+                Type::Set(Box::new(Type::Int))
+            );
+            assert_eq!(
+                result
+                    .symbol_type(symbol_of(resolution, &mapped.name))
+                    .unwrap()
+                    .ty,
+                Type::Set(Box::new(Type::String))
+            );
+
+            let Expression::Primary(filtered_value) = filtered.value.unwrap() else {
+                panic!("expected filter call");
+            };
+            let Expression::Closure(closure) =
+                filtered_value.accesses[0].call.unwrap().arguments[0]
+            else {
+                panic!("expected closure");
+            };
+            assert_eq!(
+                result
+                    .symbol_type(symbol_of(resolution, &closure.parameters[0].name))
+                    .unwrap()
+                    .ty,
+                Type::Int
             );
         });
     }

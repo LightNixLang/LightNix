@@ -3,9 +3,10 @@ use bumpalo::Bump;
 
 use crate::{
     ast::{
-        AST, AccessOperator, Array, BinaryExpression, BinaryOperator, ElseBranch, ElseBranchValue,
-        ElvisExpression, EnumVariantPattern, ExplicitTypeArgument, ExplicitTypeArguments,
-        Expression, FunctionCall, IfBranch, IfExpression, Literal, LiteralValue, MatchArm,
+        AST, AccessOperator, Array, BinaryExpression, BinaryOperator, ClosureBody,
+        ClosureExpression, ClosureParameter, ElseBranch, ElseBranchValue, ElvisExpression,
+        EnumVariantPattern, ExplicitTypeArgument, ExplicitTypeArguments, Expression,
+        FunctionAttribute, FunctionCall, IfBranch, IfExpression, Literal, LiteralValue, MatchArm,
         MatchExpression, Pattern, Primary, PrimaryAccess, ReturnExpression, SomePattern, SomeValue,
         Spanned, StringLiteral, ThrowExpression, UnaryExpression, UnaryOperator, Value,
     },
@@ -15,7 +16,7 @@ use crate::{
 
 use super::{
     ParseErrors, current_kind, is_statement_start, skip_line_feed, skip_list_separator,
-    statement::parse_type_info,
+    statement::{parse_block, parse_type_info},
 };
 
 pub(super) fn parse_expression<'input, 'allocator>(
@@ -32,8 +33,148 @@ pub(super) fn parse_expression<'input, 'allocator>(
             .map(|expression| allocator.alloc(Expression::Return(expression)) as &_),
         TokenKind::Throw => parse_throw_expression(lexer, errors, allocator)
             .map(|expression| allocator.alloc(Expression::Throw(expression)) as &_),
+        TokenKind::Inline | TokenKind::Opaque => parse_closure_expression(lexer, errors, allocator)
+            .map(|expression| allocator.alloc(Expression::Closure(expression)) as &_),
         _ => parse_elvis_expression(lexer, errors, allocator),
     }
+}
+
+fn parse_closure_expression<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut ParseErrors<'input, 'allocator>,
+    allocator: &'allocator Bump,
+) -> Option<&'allocator ClosureExpression<'input, 'allocator>> {
+    let anchor = lexer.cast_anchor();
+    let attribute = match current_kind(lexer) {
+        TokenKind::Inline => FunctionAttribute::Inline,
+        TokenKind::Opaque => FunctionAttribute::Opaque,
+        _ => return None,
+    };
+    let attribute_token = lexer.next().unwrap();
+    let attribute = Spanned::new(attribute, attribute_token.span);
+    if current_kind(lexer) != TokenKind::VerticalLine {
+        errors.push(error_here(
+            ParseErrorKind::InvalidClosureExpression,
+            lexer,
+            Expected::Token(TokenKind::VerticalLine),
+            Scope::ClosureExpression,
+        ));
+        return None;
+    }
+    lexer.next();
+    skip_line_feed(lexer);
+
+    let mut parameters = Vec::new_in(allocator);
+    while !matches!(
+        current_kind(lexer),
+        TokenKind::VerticalLine | TokenKind::None
+    ) {
+        let parameter_anchor = lexer.cast_anchor();
+        let Some(name) = super::statement::parse_literal(lexer) else {
+            let error = recover_until(
+                ParseErrorKind::InvalidClosureParameter,
+                lexer,
+                &[
+                    TokenKind::LineFeed,
+                    TokenKind::Comma,
+                    TokenKind::VerticalLine,
+                ],
+                Expected::Literal,
+                Scope::ClosureParameters,
+                allocator,
+            );
+            errors.push(error);
+            skip_list_separator(lexer);
+            continue;
+        };
+        let type_info = if current_kind(lexer) == TokenKind::Colon {
+            lexer.next();
+            let ty = parse_type_info(lexer, errors, allocator);
+            if ty.is_none() {
+                errors.push(error_here(
+                    ParseErrorKind::InvalidClosureParameter,
+                    lexer,
+                    Expected::TypeInfo,
+                    Scope::ClosureParameters,
+                ));
+            }
+            ty
+        } else {
+            None
+        };
+        parameters.push(ClosureParameter {
+            name,
+            type_info,
+            span: parameter_anchor.elapsed(lexer),
+        });
+        if current_kind(lexer) != TokenKind::VerticalLine && !skip_list_separator(lexer) {
+            errors.push(error_here(
+                ParseErrorKind::InvalidClosureParameter,
+                lexer,
+                Expected::Token(TokenKind::Comma),
+                Scope::ClosureParameters,
+            ));
+            break;
+        }
+    }
+    if current_kind(lexer) != TokenKind::VerticalLine {
+        errors.push(error_here(
+            ParseErrorKind::InvalidClosureExpression,
+            lexer,
+            Expected::Token(TokenKind::VerticalLine),
+            Scope::ClosureExpression,
+        ));
+        return None;
+    }
+    lexer.next();
+    let return_type = if current_kind(lexer) == TokenKind::ThinArrow {
+        lexer.next();
+        let ty = parse_type_info(lexer, errors, allocator);
+        if ty.is_none() {
+            errors.push(error_here(
+                ParseErrorKind::InvalidClosureExpression,
+                lexer,
+                Expected::TypeInfo,
+                Scope::ClosureExpression,
+            ));
+        }
+        ty
+    } else {
+        None
+    };
+    skip_line_feed(lexer);
+    if current_kind(lexer) != TokenKind::FatArrow {
+        errors.push(error_here(
+            ParseErrorKind::InvalidClosureExpression,
+            lexer,
+            Expected::Token(TokenKind::FatArrow),
+            Scope::ClosureExpression,
+        ));
+        return None;
+    }
+    lexer.next();
+    skip_line_feed(lexer);
+    let body = if current_kind(lexer) == TokenKind::BraceLeft {
+        parse_block(lexer, errors, allocator).map(ClosureBody::Block)
+    } else {
+        parse_expression(lexer, errors, allocator).map(ClosureBody::Expression)
+    };
+    let Some(body) = body else {
+        errors.push(error_here(
+            ParseErrorKind::InvalidClosureExpression,
+            lexer,
+            Expected::Expression,
+            Scope::ClosureExpression,
+        ));
+        return None;
+    };
+    Some(allocator.alloc(ClosureExpression {
+        attribute,
+        parameters: allocator.alloc_slice_fill_iter(parameters),
+        return_type,
+        body,
+        span: anchor.elapsed(lexer),
+    }))
 }
 
 fn parse_elvis_expression<'input, 'allocator>(
@@ -541,7 +682,11 @@ fn parse_function_call<'input, 'allocator>(
         if is_statement_start(current_kind(lexer))
             && !matches!(
                 current_kind(lexer),
-                TokenKind::If | TokenKind::Match | TokenKind::Return
+                TokenKind::If
+                    | TokenKind::Match
+                    | TokenKind::Return
+                    | TokenKind::Inline
+                    | TokenKind::Opaque
             )
         {
             break;

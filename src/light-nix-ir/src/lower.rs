@@ -5,16 +5,17 @@ use light_nix_name_resolver::{
     TypeDefKind,
 };
 use light_nix_parser::ast::{
-    AST, AccessOperator, BinaryOperator, Block, ElseBranchValue, Expression, LetStatement, Literal,
-    MutationPolicyKind, Pattern, Primary, Source, Statement, Statements, UnaryOperator, Value,
+    AST, AccessOperator, BinaryOperator, Block, ClosureBody, ClosureExpression, ElseBranchValue,
+    Expression, FunctionAttribute, LetStatement, Literal, MutationPolicyKind, Pattern, Primary,
+    Source, Statement, Statements, UnaryOperator, Value,
 };
 use light_nix_type_checker::{MemberResolution, Type, TypeCheckResult};
 
 use crate::{
-    BinaryOperation, BuildError, CallTarget, Constant, ConstraintKind, ConstraintModel,
-    ExpressionId, LowerError, LowerErrorKind, ModelBuilder, MutationPolicy, ObjectiveKind,
-    OutputPath, SourceOrigin, UnaryOperation, VariableId, VariableKind, VariableSource,
-    WeightedVariable,
+    BinaryOperation, BuildError, CallTarget, ClosureParameter, Constant, ConstraintKind,
+    ConstraintModel, ExpressionId, FunctionMode, LowerError, LowerErrorKind, ModelBuilder,
+    MutationPolicy, ObjectiveKind, OutputPath, SourceOrigin, UnaryOperation, VariableId,
+    VariableKind, VariableSource, WeightedVariable,
 };
 
 #[derive(Debug)]
@@ -485,6 +486,7 @@ impl<'ast, 'input, 'allocator> Lowerer<'ast, 'input, 'allocator> {
                 }
                 self.unreachable(ty, node.span.clone())
             }
+            Expression::Closure(node) => self.lower_closure(node, guard, &ty),
             Expression::Elvis(node) => {
                 let optional = self.lower_expression(node.optional, guard).expression;
                 let is_null = self.is_null(optional, node.optional.span());
@@ -532,6 +534,53 @@ impl<'ast, 'input, 'allocator> Lowerer<'ast, 'input, 'allocator> {
             expression: expression_id,
             path: None,
         }
+    }
+
+    fn lower_closure(
+        &mut self,
+        closure: &'ast ClosureExpression<'input, 'allocator>,
+        guard: ExpressionId,
+        ty: &Type,
+    ) -> ExpressionId {
+        let Type::Function(function_type) = ty else {
+            return self.unreachable(ty.clone(), closure.span.clone());
+        };
+        let mut frame = HashMap::new();
+        let mut parameters = Vec::new();
+        for (parameter, parameter_type) in closure.parameters.iter().zip(&function_type.parameters)
+        {
+            let Some(symbol) = self.symbol_declaration(&parameter.name) else {
+                continue;
+            };
+            let reference = self.builder.parameter_reference(
+                symbol,
+                parameter_type.clone(),
+                Some(self.origin(parameter.span.clone())),
+            );
+            let reference =
+                self.finish_expression(reference, parameter_type.clone(), parameter.span.clone());
+            frame.insert(symbol, reference);
+            parameters.push(ClosureParameter::new(symbol, parameter_type.clone()));
+        }
+        self.frames.push(frame);
+        let body = match closure.body {
+            ClosureBody::Expression(expression) => {
+                self.lower_expression(expression, guard).expression
+            }
+            ClosureBody::Block(block) => self.lower_block(block, guard, &function_type.return_type),
+        };
+        self.frames.pop();
+        let mode = match closure.attribute.value {
+            FunctionAttribute::Inline => FunctionMode::Inline,
+            FunctionAttribute::Opaque => FunctionMode::Opaque,
+        };
+        let result = self.builder.closure(
+            mode,
+            parameters,
+            body,
+            Some(self.origin(closure.span.clone())),
+        );
+        self.finish_expression(result, ty.clone(), closure.span.clone())
     }
 
     fn lower_if(
@@ -1487,7 +1536,9 @@ mod tests {
             | ExpressionKind::Constant(_)
             | ExpressionKind::Output(_)
             | ExpressionKind::Function(_)
+            | ExpressionKind::Parameter(_)
             | ExpressionKind::Null => false,
+            ExpressionKind::Closure { body, .. } => contains_variable(model, *body, variable),
         }
     }
 
@@ -1688,6 +1739,60 @@ programs.selected = selected
                 .any(|constraint| constraint.kind() == ConstraintKind::Validity)
         );
         assert_eq!(model.outputs().len(), 2);
+    }
+
+    #[test]
+    fn lowers_closures_to_typed_parameters_and_preserves_their_modes() {
+        let source = r#"
+type Programs {
+    filtered: Set<Int>
+    mapped: Set<Int>
+}
+let values = [1, 2, 3]
+let filtered = values.filter(inline |value| => value > 1)
+let mapped = values.map(opaque |value: Int| -> Int => {
+    return value + 1
+})
+declare let programs: Programs
+programs.filtered = filtered
+programs.mapped = mapped
+"#;
+        let arena = AstArena::new();
+        let ast = parse(source, &arena);
+        let resolution = collect_module(ast, ModuleId(0)).resolve(&ImportEnvironment::default());
+        assert!(resolution.errors().is_empty(), "{:#?}", resolution.errors());
+        let types = check_module(ast, &resolution, &TypeEnvironment::default());
+        assert!(types.errors().is_empty(), "{:#?}", types.errors());
+        let lowered = lower_module(ast, &resolution, &types);
+        assert!(lowered.errors().is_empty(), "{:#?}", lowered.errors());
+        let model = lowered.model();
+
+        let closures = model
+            .expressions()
+            .filter_map(|expression| match expression.kind() {
+                ExpressionKind::Closure {
+                    mode,
+                    parameters,
+                    body,
+                } => Some((*mode, parameters, *body)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(closures.len(), 2);
+        assert_eq!(closures[0].0, FunctionMode::Inline);
+        assert_eq!(closures[1].0, FunctionMode::Opaque);
+        for (_, parameters, body) in closures {
+            assert_eq!(parameters.len(), 1);
+            assert_eq!(parameters[0].ty(), &light_nix_type_checker::Type::Int);
+            assert!(model.expressions().any(|expression| {
+                matches!(
+                    expression.kind(),
+                    ExpressionKind::Parameter(symbol)
+                        if *symbol == parameters[0].symbol()
+                )
+            }));
+            assert!(model.expression(body).is_some());
+        }
     }
 
     #[test]

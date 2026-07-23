@@ -2,10 +2,10 @@ use light_nix_name_resolver::ModuleId;
 use light_nix_type_checker::Type;
 
 use crate::{
-    BinaryOperation, BuildError, BuildErrorKind, CallTarget, Constant, ConstraintId,
-    ConstraintKind, ConstraintModel, ExpressionId, ExpressionKind, MutationPolicy, ObjectiveId,
-    ObjectiveKind, OutputPath, SourceOrigin, UnaryOperation, VariableId, VariableKind,
-    VariableSource,
+    BinaryOperation, BuildError, BuildErrorKind, CallTarget, ClosureParameter, Constant,
+    ConstraintId, ConstraintKind, ConstraintModel, ExpressionId, ExpressionKind, FunctionMode,
+    MutationPolicy, ObjectiveId, ObjectiveKind, OutputPath, SourceOrigin, UnaryOperation,
+    VariableId, VariableKind, VariableSource,
     model::{constraint, expression, objective, output_case, path_declaration, variable},
 };
 
@@ -125,6 +125,41 @@ impl ModelBuilder {
         origin: Option<SourceOrigin>,
     ) -> Result<ExpressionId, BuildError> {
         self.push_expression(ty, ExpressionKind::Function(symbol), origin)
+    }
+
+    pub fn parameter_reference(
+        &mut self,
+        symbol: light_nix_name_resolver::SymbolId,
+        ty: Type,
+        origin: Option<SourceOrigin>,
+    ) -> Result<ExpressionId, BuildError> {
+        self.push_expression(ty, ExpressionKind::Parameter(symbol), origin)
+    }
+
+    pub fn closure(
+        &mut self,
+        mode: FunctionMode,
+        parameters: Vec<ClosureParameter>,
+        body: ExpressionId,
+        origin: Option<SourceOrigin>,
+    ) -> Result<ExpressionId, BuildError> {
+        let return_type = self.expression_type(body)?.clone();
+        let ty = Type::function(
+            parameters
+                .iter()
+                .map(|parameter| parameter.ty().clone())
+                .collect(),
+            return_type,
+        );
+        self.push_expression(
+            ty,
+            ExpressionKind::Closure {
+                mode,
+                parameters,
+                body,
+            },
+            origin,
+        )
     }
 
     pub fn set(

@@ -164,10 +164,22 @@ fn parse_statement<'input, 'allocator>(
             parse_assert_statement(lexer, errors, allocator).map(Statement::AssertStatement)
         }
         TokenKind::Inline | TokenKind::Opaque => {
-            parse_function_define(lexer, errors, allocator).map(Statement::FunctionDefine)
+            if attribute_starts_function(lexer) {
+                parse_function_define(lexer, errors, allocator).map(Statement::FunctionDefine)
+            } else {
+                parse_assign_or_expression_statement(lexer, errors, allocator)
+            }
         }
         _ => parse_assign_or_expression_statement(lexer, errors, allocator),
     }
+}
+
+fn attribute_starts_function(lexer: &mut Lexer<'_>) -> bool {
+    let anchor = lexer.cast_anchor();
+    lexer.next();
+    let is_function = current_kind(lexer) == TokenKind::Function;
+    lexer.back_to_anchor(anchor);
+    is_function
 }
 
 fn parse_exported_statement<'input, 'allocator>(
@@ -2006,7 +2018,7 @@ fn parse_export_modifier(lexer: &mut Lexer<'_>) -> bool {
     true
 }
 
-fn parse_literal<'input>(lexer: &mut Lexer<'input>) -> Option<Literal<'input>> {
+pub(super) fn parse_literal<'input>(lexer: &mut Lexer<'input>) -> Option<Literal<'input>> {
     if current_kind(lexer) != TokenKind::Literal {
         return None;
     }
@@ -2086,8 +2098,8 @@ mod tests {
 
     use crate::{
         ast::{
-            AccessOperator, BinaryOperator, Expression, ImportKind, MutationPolicyKind, Pattern,
-            Statement, TypedefValue, Value,
+            AccessOperator, BinaryOperator, ClosureBody, Expression, FunctionAttribute, ImportKind,
+            MutationPolicyKind, Pattern, Statement, TypedefValue, Value,
         },
         error::ParseErrorKind,
         lexer::Lexer,
@@ -2186,6 +2198,57 @@ inline function calculate(left: Number, right: Number) -> Number {
             function.body.statements.statements[3],
             Statement::Expression(Expression::Return(_))
         ));
+    }
+
+    #[test]
+    fn parses_inline_and_opaque_closures_with_expression_and_block_bodies() {
+        let source = r#"
+let filtered = values.filter(inline |value| => value > 1)
+let mapped = values.map(opaque |value: Int| -> Int => {
+    return value + 1
+})
+opaque function named(value: Int) -> Int {
+    return value
+}
+"#;
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert!(errors.is_empty(), "parse errors: {errors:#?}");
+        assert_eq!(ast.statements.len(), 3);
+
+        let Statement::LetStatement(filtered) = ast.statements[0] else {
+            panic!("expected filtered binding");
+        };
+        let Expression::Primary(filtered) = filtered.value.unwrap() else {
+            panic!("expected filter call");
+        };
+        let Expression::Closure(closure) = filtered.accesses[0].call.unwrap().arguments[0] else {
+            panic!("expected inline closure");
+        };
+        assert_eq!(closure.attribute.value, FunctionAttribute::Inline);
+        assert_eq!(closure.parameters.len(), 1);
+        assert!(closure.parameters[0].type_info.is_none());
+        assert!(matches!(closure.body, ClosureBody::Expression(_)));
+
+        let Statement::LetStatement(mapped) = ast.statements[1] else {
+            panic!("expected mapped binding");
+        };
+        let Expression::Primary(mapped) = mapped.value.unwrap() else {
+            panic!("expected map call");
+        };
+        let Expression::Closure(closure) = mapped.accesses[0].call.unwrap().arguments[0] else {
+            panic!("expected opaque closure");
+        };
+        assert_eq!(closure.attribute.value, FunctionAttribute::Opaque);
+        assert_eq!(closure.parameters[0].type_info.unwrap().name.value, "Int");
+        assert_eq!(closure.return_type.unwrap().name.value, "Int");
+        assert!(matches!(closure.body, ClosureBody::Block(_)));
+
+        assert!(matches!(ast.statements[2], Statement::FunctionDefine(_)));
     }
 
     #[test]

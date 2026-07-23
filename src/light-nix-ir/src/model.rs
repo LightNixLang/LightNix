@@ -174,6 +174,33 @@ pub enum CallTarget {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum FunctionMode {
+    Inline,
+    Opaque,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ClosureParameter {
+    symbol: SymbolId,
+    ty: Type,
+}
+
+impl ClosureParameter {
+    pub fn new(symbol: SymbolId, ty: Type) -> Self {
+        Self { symbol, ty }
+    }
+
+    pub fn symbol(&self) -> SymbolId {
+        self.symbol
+    }
+
+    pub fn ty(&self) -> &Type {
+        &self.ty
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum ExpressionKind {
@@ -182,6 +209,12 @@ pub enum ExpressionKind {
     Variable(VariableId),
     Output(OutputPath),
     Function(SymbolId),
+    Parameter(SymbolId),
+    Closure {
+        mode: FunctionMode,
+        parameters: Vec<ClosureParameter>,
+        body: ExpressionId,
+    },
     Set(Vec<ExpressionId>),
     Some(ExpressionId),
     Null,

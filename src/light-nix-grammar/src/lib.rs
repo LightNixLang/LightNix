@@ -63,7 +63,7 @@ mod grammar {
         mutation_policy      ::= "readonly"
                                  | "tunable" [ "(" "cost" "=" integer_literal ")" ]
 
-        assign_statement     ::= expression "=" expression
+        assign_statement     ::= primary "=" expression
 
         function_define      ::= [ "export" ] method_define
         method_define        ::= function_attribute "function" literal [ generic_parameters ]
@@ -89,6 +89,13 @@ mod grammar {
                                  | match_expression
                                  | return_expression
                                  | throw_expression
+                                 | closure_expression
+
+        closure_expression   ::= function_attribute "|" [ lf ]
+                                 { closure_parameter [ lf_or_comma ] } "|"
+                                 [ "->" type_info ] [ lf ] "=>" [ lf ] closure_body
+        closure_parameter    ::= literal [ ":" type_info ]
+        closure_body         ::= expression | block
 
         elvis_expr           ::= or_expr [ "?:" expression ]
 
