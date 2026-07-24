@@ -4,7 +4,7 @@ use light_nix_name_resolver::{
     Declaration, ModuleId, NameResolution, Res, SymbolId, SymbolKind, VariantId,
 };
 use light_nix_parser::ast::{
-    AST, AccessOperator, Array, BinaryOperator, Block, ClosureBody, ClosureExpression,
+    AST, AccessOperator, Array, AssignValue, BinaryOperator, Block, ClosureBody, ClosureExpression,
     ElseBranchValue, Expression, FunctionAttribute, FunctionCall, FunctionDefine, LetStatement,
     Literal, MatchArm, MutationPolicyKind, Pattern, Primary, PrimaryAccess, Source, Statement,
     Statements, UnaryOperator, Value,
@@ -361,10 +361,32 @@ impl<'ast, 'input, 'allocator, 'context, 'inputs>
                         node.target.span(),
                     );
                 };
+                let Some(target_type) = self.types.expression_type(node.target).cloned() else {
+                    return self.fail(
+                        EvaluationErrorKind::InvalidAssignmentTarget,
+                        node.target.span(),
+                    );
+                };
+                self.eval_assign_value(path, target_type, &node.value, node.span.clone())
+            }
+            Statement::FunctionDefine(_) => Ok(TrackedValue::pure(RuntimeValue::Unit)),
+            Statement::Expression(expression) => self.eval_expression(expression),
+        }
+    }
+
+    fn eval_assign_value(
+        &mut self,
+        path: OutputPath,
+        target_type: Type,
+        value: &'ast AssignValue<'input, 'allocator>,
+        span: std::ops::Range<usize>,
+    ) -> Eval<TrackedValue> {
+        match value {
+            AssignValue::Expression(expression) => {
                 if self.inputs.output_overrides.contains_key(&path) {
                     return Ok(TrackedValue::pure(RuntimeValue::Unit));
                 }
-                let mut value = self.eval_expression(node.value)?;
+                let mut value = self.eval_expression(expression)?;
                 value
                     .dependencies
                     .extend(self.control_dependencies.iter().copied());
@@ -377,21 +399,34 @@ impl<'ast, 'input, 'allocator, 'context, 'inputs>
                     opaque_dependencies: value.opaque_dependencies.clone(),
                     origin: SourceOrigin {
                         module: self.module,
-                        span: node.span.clone(),
+                        span: span.clone(),
                     },
                 };
                 if self.snapshot.contains(&path) {
-                    return self.fail(
-                        EvaluationErrorKind::DuplicateAssignment { path },
-                        node.span.clone(),
-                    );
+                    return self.fail(EvaluationErrorKind::DuplicateAssignment { path }, span);
                 }
                 self.snapshot.insert(path, entry);
-                Ok(TrackedValue::pure(RuntimeValue::Unit))
             }
-            Statement::FunctionDefine(_) => Ok(TrackedValue::pure(RuntimeValue::Unit)),
-            Statement::Expression(expression) => self.eval_expression(expression),
+            AssignValue::Nested(nested) => {
+                for field in nested.fields {
+                    let Some((field_id, field_type)) =
+                        self.types.named_field(&target_type, field.name.value)
+                    else {
+                        return self.fail(
+                            EvaluationErrorKind::InvalidAssignmentTarget,
+                            field.name.span.clone(),
+                        );
+                    };
+                    self.eval_assign_value(
+                        path.clone().field(field_id),
+                        field_type,
+                        &field.value,
+                        field.span.clone(),
+                    )?;
+                }
+            }
         }
+        Ok(TrackedValue::pure(RuntimeValue::Unit))
     }
 
     fn eval_block(&mut self, block: &'ast Block<'input, 'allocator>) -> Eval<TrackedValue> {

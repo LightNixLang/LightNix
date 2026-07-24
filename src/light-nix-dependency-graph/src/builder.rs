@@ -2,8 +2,8 @@ use std::marker::PhantomData;
 
 use light_nix_name_resolver::{Declaration, NameResolution, Res, SymbolKind};
 use light_nix_parser::ast::{
-    AST, Array, ClosureBody, ElseBranchValue, Expression, FunctionCall, FunctionDefine, Literal,
-    MatchArm, Pattern, Primary, Source, Statement, Statements, Value,
+    AST, Array, AssignValue, ClosureBody, ElseBranchValue, Expression, FunctionCall,
+    FunctionDefine, Literal, MatchArm, Pattern, Primary, Source, Statement, Statements, Value,
 };
 use light_nix_type_checker::{MemberResolution, TypeCheckResult};
 
@@ -142,7 +142,7 @@ impl<'ast, 'input, 'allocator, 'context> Builder<'ast, 'input, 'allocator, 'cont
                 );
                 self.with_optional_owner(owner, |builder| {
                     builder.visit_expression(node.target);
-                    builder.visit_expression(node.value);
+                    builder.visit_assign_value(&node.value);
                 });
             }
             Statement::FunctionDefine(node) => self.visit_function(node),
@@ -153,6 +153,17 @@ impl<'ast, 'input, 'allocator, 'context> Builder<'ast, 'input, 'allocator, 'cont
                     expression.span(),
                 );
                 self.with_optional_owner(owner, |builder| builder.visit_expression(expression));
+            }
+        }
+    }
+
+    fn visit_assign_value(&mut self, value: &'ast AssignValue<'input, 'allocator>) {
+        match value {
+            AssignValue::Expression(expression) => self.visit_expression(expression),
+            AssignValue::Nested(nested) => {
+                for field in nested.fields {
+                    self.visit_assign_value(&field.value);
+                }
             }
         }
     }

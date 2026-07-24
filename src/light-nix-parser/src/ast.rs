@@ -273,11 +273,43 @@ pub enum MutationPolicyKind {
 #[derive(Debug)]
 pub struct AssignStatement<'input, 'allocator> {
     pub target: &'allocator Expression<'input, 'allocator>,
-    pub value: &'allocator Expression<'input, 'allocator>,
+    pub value: AssignValue<'input, 'allocator>,
     pub span: Range<usize>,
 }
 
 impl_ast!(impl<'input, 'allocator> for AssignStatement<'input, 'allocator>);
+
+#[derive(Debug, Clone, Copy)]
+pub enum AssignValue<'input, 'allocator> {
+    Expression(&'allocator Expression<'input, 'allocator>),
+    Nested(&'allocator NestedAssignment<'input, 'allocator>),
+}
+
+impl AST for AssignValue<'_, '_> {
+    fn span(&self) -> Range<usize> {
+        match self {
+            Self::Expression(node) => node.span(),
+            Self::Nested(node) => node.span(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct NestedAssignment<'input, 'allocator> {
+    pub fields: &'allocator [NestedAssignmentField<'input, 'allocator>],
+    pub span: Range<usize>,
+}
+
+impl_ast!(impl<'input, 'allocator> for NestedAssignment<'input, 'allocator>);
+
+#[derive(Debug)]
+pub struct NestedAssignmentField<'input, 'allocator> {
+    pub name: Literal<'input>,
+    pub value: AssignValue<'input, 'allocator>,
+    pub span: Range<usize>,
+}
+
+impl_ast!(impl<'input, 'allocator> for NestedAssignmentField<'input, 'allocator>);
 
 #[derive(Debug)]
 pub struct FunctionDefine<'input, 'allocator> {

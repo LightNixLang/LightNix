@@ -63,7 +63,10 @@ mod grammar {
         mutation_policy      ::= "readonly"
                                  | "tunable" [ "(" "cost" "=" integer_literal ")" ]
 
-        assign_statement     ::= primary "=" expression
+        assign_statement     ::= primary "=" [ lf ] assign_value
+        assign_value         ::= expression | nested_assignment
+        nested_assignment    ::= "{" [ lf ] { nested_assignment_field lf_or_comma } "}"
+        nested_assignment_field ::= literal "=" [ lf ] assign_value
 
         function_define      ::= [ "export" ] method_define
         method_define        ::= function_attribute "function" literal [ generic_parameters ]

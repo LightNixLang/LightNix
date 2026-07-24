@@ -8,11 +8,11 @@ use light_nix_name_resolver::{
     SymbolId, SymbolKind, TypeDefId, TypeDefKind,
 };
 use light_nix_parser::ast::{
-    AST, AccessOperator, Array, BinaryOperator, ClosureBody, ClosureExpression, ElseBranchValue,
-    ExplicitTypeArgument, ExplicitTypeArguments, Expression, FunctionCall, FunctionDefine,
-    GenericParameters, ImplementsDefine, InterfaceDefine, LetStatement, Pattern, Primary,
-    PrimaryAccess, Source, Statement, Statements, TypeDefine, TypeInfo, TypedefBlock, TypedefValue,
-    UnaryOperator, Value, WhereClause,
+    AST, AccessOperator, Array, AssignValue, BinaryOperator, ClosureBody, ClosureExpression,
+    ElseBranchValue, ExplicitTypeArgument, ExplicitTypeArguments, Expression, FunctionCall,
+    FunctionDefine, GenericParameters, ImplementsDefine, InterfaceDefine, LetStatement,
+    NestedAssignment, Pattern, Primary, PrimaryAccess, Source, Statement, Statements, TypeDefine,
+    TypeInfo, TypedefBlock, TypedefValue, UnaryOperator, Value, WhereClause,
 };
 
 use crate::{
@@ -922,8 +922,7 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
                     );
                 }
                 let target = self.infer_expression(node.target);
-                let value = self.infer_expression(node.value);
-                self.unify_at(&target, &value, node.value.span());
+                self.check_assign_value(&target, &node.value);
                 Type::Unit
             }
             Statement::FunctionDefine(node) => {
@@ -931,6 +930,47 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
                 Type::Unit
             }
             Statement::Expression(expression) => self.infer_expression(expression),
+        }
+    }
+
+    fn check_assign_value(
+        &mut self,
+        expected: &Type,
+        value: &'ast AssignValue<'input, 'allocator>,
+    ) {
+        match value {
+            AssignValue::Expression(expression) => {
+                let found = self.infer_expression(expression);
+                self.unify_at(expected, &found, expression.span());
+            }
+            AssignValue::Nested(nested) => self.check_nested_assignment(expected, nested),
+        }
+    }
+
+    fn check_nested_assignment(
+        &mut self,
+        expected: &Type,
+        nested: &'ast NestedAssignment<'input, 'allocator>,
+    ) {
+        let receiver = self.unifier.resolve(expected);
+        for field in nested.fields {
+            let Some((field_id, field_type)) =
+                self.resolve_named_field(&receiver, field.name.value)
+            else {
+                self.error(
+                    TypeCheckErrorKind::UnknownMember {
+                        receiver: receiver.clone(),
+                        member: field.name.value.to_owned(),
+                    },
+                    field.name.span.clone(),
+                );
+                continue;
+            };
+            self.member_resolutions.insert(
+                AstId::new(&field.name, AstKind::Literal),
+                MemberResolution::Field(field_id),
+            );
+            self.check_assign_value(&field_type, &field.value);
         }
     }
 
@@ -1437,30 +1477,14 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
         access: &'ast light_nix_parser::ast::PrimaryAccess<'input, 'allocator>,
     ) -> Type {
         if access.call.is_none()
-            && let Type::Named(owner, arguments) = receiver
-            && let Some(field_id) = self
-                .field_lookup
-                .get(&(*owner, access.member.value.to_owned()))
-                .copied()
+            && let Some((field_id, field_type)) =
+                self.resolve_named_field(receiver, access.member.value)
         {
             self.member_resolutions.insert(
                 AstId::new(&access.member, AstKind::Literal),
                 MemberResolution::Field(field_id),
             );
-            let field_type = self
-                .field_types
-                .get(&field_id)
-                .cloned()
-                .unwrap_or(Type::Error);
-            let substitutions: HashMap<_, _> = self
-                .type_parameters
-                .get(owner)
-                .into_iter()
-                .flatten()
-                .copied()
-                .zip(arguments.iter().cloned())
-                .collect();
-            return substitute(&field_type, &substitutions);
+            return field_type;
         }
         if let Some(ty) = self.infer_builtin_member(receiver, access) {
             return ty;
@@ -1545,6 +1569,27 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
             access.member.span.clone(),
         );
         Type::Error
+    }
+
+    fn resolve_named_field(&self, receiver: &Type, name: &str) -> Option<(FieldId, Type)> {
+        let Type::Named(owner, arguments) = receiver else {
+            return None;
+        };
+        let field_id = *self.field_lookup.get(&(*owner, name.to_owned()))?;
+        let field_type = self
+            .field_types
+            .get(&field_id)
+            .cloned()
+            .unwrap_or(Type::Error);
+        let substitutions = self
+            .type_parameters
+            .get(owner)
+            .into_iter()
+            .flatten()
+            .copied()
+            .zip(arguments.iter().cloned())
+            .collect();
+        Some((field_id, substitute(&field_type, &substitutions)))
     }
 
     fn infer_builtin_member(
@@ -2996,6 +3041,44 @@ let invalid = match optional {
                     .ty,
                 Type::Int
             );
+        });
+    }
+
+    #[test]
+    fn checks_nested_assignment_fields_and_leaf_values() {
+        let source = r#"
+type Settings { count: Int }
+type Config {
+    enabled: Bool
+    settings: Settings
+}
+declare let config: Config
+config = {
+    enabled = true
+    settings = {
+        count = 10
+    }
+}
+config = {
+    enabled = 1
+    settings = {
+        missing = false
+    }
+}
+"#;
+        check_source(source, |_, _, result| {
+            assert_eq!(result.errors().len(), 2, "{:#?}", result.errors());
+            assert!(result.errors().iter().any(|error| matches!(
+                error.kind,
+                TypeCheckErrorKind::TypeMismatch {
+                    expected: Type::Bool,
+                    found: Type::Int,
+                }
+            )));
+            assert!(result.errors().iter().any(|error| matches!(
+                &error.kind,
+                TypeCheckErrorKind::UnknownMember { member, .. } if member == "missing"
+            )));
         });
     }
 

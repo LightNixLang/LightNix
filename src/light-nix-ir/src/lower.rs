@@ -5,9 +5,9 @@ use light_nix_name_resolver::{
     TypeDefKind,
 };
 use light_nix_parser::ast::{
-    AST, AccessOperator, BinaryOperator, Block, ClosureBody, ClosureExpression, ElseBranchValue,
-    Expression, FunctionAttribute, LetStatement, Literal, MutationPolicyKind, Pattern, Primary,
-    Source, Statement, Statements, UnaryOperator, Value,
+    AST, AccessOperator, AssignValue, BinaryOperator, Block, ClosureBody, ClosureExpression,
+    ElseBranchValue, Expression, FunctionAttribute, LetStatement, Literal, MutationPolicyKind,
+    Pattern, Primary, Source, Statement, Statements, UnaryOperator, Value,
 };
 use light_nix_type_checker::{MemberResolution, Type, TypeCheckResult};
 
@@ -399,18 +399,14 @@ impl<'ast, 'input, 'allocator, 'context> Lowerer<'ast, 'input, 'allocator, 'cont
                         self.error(LowerErrorKind::InvalidAssignmentTarget, node.target.span());
                         continue;
                     };
-                    let value = self.lower_expression(node.value, guard).expression;
-                    let add = self.builder.add_output_case(
+                    self.lower_assign_value(
                         path,
                         ty,
                         policy,
                         guard,
-                        value,
-                        self.origin(node.span.clone()),
+                        &node.value,
+                        node.span.clone(),
                     );
-                    if let Err(error) = add {
-                        self.build_error(error, node.span.clone());
-                    }
                 }
                 Statement::Expression(expression) => {
                     if let Expression::Return(node) = expression {
@@ -425,6 +421,56 @@ impl<'ast, 'input, 'allocator, 'context> Lowerer<'ast, 'input, 'allocator, 'cont
             }
         }
         result
+    }
+
+    fn lower_assign_value(
+        &mut self,
+        path: OutputPath,
+        target_type: Type,
+        policy: MutationPolicy,
+        guard: ExpressionId,
+        value: &'ast AssignValue<'input, 'allocator>,
+        span: std::ops::Range<usize>,
+    ) {
+        match value {
+            AssignValue::Expression(expression) => {
+                let value = self.lower_expression(expression, guard).expression;
+                let add = self.builder.add_output_case(
+                    path,
+                    target_type,
+                    policy,
+                    guard,
+                    value,
+                    self.origin(span.clone()),
+                );
+                if let Err(error) = add {
+                    self.build_error(error, span);
+                }
+            }
+            AssignValue::Nested(nested) => {
+                for field in nested.fields {
+                    let Some((field_id, field_type)) =
+                        self.types.named_field(&target_type, field.name.value)
+                    else {
+                        self.error(LowerErrorKind::MissingType, field.name.span.clone());
+                        continue;
+                    };
+                    let field_policy = self
+                        .field_policies
+                        .get(&field_id)
+                        .copied()
+                        .unwrap_or(policy);
+                    self.lower_assign_value(
+                        path.clone().field(field_id),
+                        field_type,
+                        field_policy,
+                        guard,
+                        &field.value,
+                        field.span.clone(),
+                    );
+                }
+            }
+        }
     }
 
     fn lower_block(

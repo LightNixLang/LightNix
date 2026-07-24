@@ -3,12 +3,13 @@ use bumpalo::Bump;
 
 use crate::{
     ast::{
-        AssertStatement, AssignStatement, Block, EnumDefine, EnumVariant, Expression,
+        AssertStatement, AssignStatement, AssignValue, Block, EnumDefine, EnumVariant, Expression,
         FunctionArgument, FunctionArguments, FunctionAttribute, FunctionDefine, GenericParameter,
         GenericParameters, ImplementsDefine, ImportElement, ImportKind, ImportStatement,
-        InterfaceDefine, LetStatement, Literal, MutationPolicy, MutationPolicyKind, Source,
-        Spanned, Statement, Statements, StringLiteral, TypeDefine, TypeInfo, Typedef, TypedefBlock,
-        TypedefValue, UseDeclare, WhereClause, WherePredicate,
+        InterfaceDefine, LetStatement, Literal, MutationPolicy, MutationPolicyKind,
+        NestedAssignment, NestedAssignmentField, Source, Spanned, Statement, Statements,
+        StringLiteral, TypeDefine, TypeInfo, Typedef, TypedefBlock, TypedefValue, UseDeclare,
+        WhereClause, WherePredicate,
     },
     error::{Expected, ParseErrorKind, Scope, error_here, recover_until},
     lexer::{Lexer, TokenKind},
@@ -1145,8 +1146,9 @@ fn parse_assign_or_expression_statement<'input, 'allocator>(
         return None;
     }
     lexer.next();
+    skip_line_feed(lexer);
 
-    let Some(value) = parse_expression(lexer, errors, allocator) else {
+    let Some(value) = parse_assign_value(lexer, errors, allocator) else {
         errors.push(error_here(
             ParseErrorKind::InvalidAssignStatement,
             lexer,
@@ -1162,6 +1164,132 @@ fn parse_assign_or_expression_statement<'input, 'allocator>(
         span: anchor.elapsed(lexer),
     });
     Some(Statement::AssignStatement(assignment))
+}
+
+fn parse_assign_value<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut ParseErrors<'input, 'allocator>,
+    allocator: &'allocator Bump,
+) -> Option<AssignValue<'input, 'allocator>> {
+    if current_kind(lexer) == TokenKind::BraceLeft {
+        parse_nested_assignment(lexer, errors, allocator).map(AssignValue::Nested)
+    } else {
+        parse_expression(lexer, errors, allocator).map(AssignValue::Expression)
+    }
+}
+
+fn parse_nested_assignment<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut ParseErrors<'input, 'allocator>,
+    allocator: &'allocator Bump,
+) -> Option<&'allocator NestedAssignment<'input, 'allocator>> {
+    if current_kind(lexer) != TokenKind::BraceLeft {
+        return None;
+    }
+
+    let anchor = lexer.cast_anchor();
+    lexer.next();
+    skip_line_feed(lexer);
+    let mut fields = Vec::new_in(allocator);
+
+    loop {
+        if is_statement_start(current_kind(lexer)) {
+            break;
+        }
+        match current_kind(lexer) {
+            TokenKind::BraceRight | TokenKind::None => break,
+            _ => {}
+        }
+
+        let field_anchor = lexer.cast_anchor();
+        let Some(name) = parse_literal(lexer) else {
+            let error = recover_until(
+                ParseErrorKind::InvalidNestedAssignmentField,
+                lexer,
+                &[TokenKind::LineFeed, TokenKind::Comma, TokenKind::BraceRight],
+                Expected::Literal,
+                Scope::NestedAssignmentField,
+                allocator,
+            );
+            errors.push(error);
+            if current_kind(lexer) == TokenKind::BraceRight {
+                break;
+            }
+            skip_list_separator(lexer);
+            continue;
+        };
+
+        if current_kind(lexer) != TokenKind::Equal {
+            let error = recover_until(
+                ParseErrorKind::InvalidNestedAssignmentField,
+                lexer,
+                &[TokenKind::LineFeed, TokenKind::Comma, TokenKind::BraceRight],
+                Expected::Token(TokenKind::Equal),
+                Scope::NestedAssignmentField,
+                allocator,
+            );
+            errors.push(error);
+            if current_kind(lexer) == TokenKind::BraceRight {
+                break;
+            }
+            skip_list_separator(lexer);
+            continue;
+        }
+        lexer.next();
+        skip_line_feed(lexer);
+
+        let Some(value) = parse_assign_value(lexer, errors, allocator) else {
+            let error = recover_until(
+                ParseErrorKind::InvalidNestedAssignmentField,
+                lexer,
+                &[TokenKind::LineFeed, TokenKind::Comma, TokenKind::BraceRight],
+                Expected::Expression,
+                Scope::NestedAssignmentField,
+                allocator,
+            );
+            errors.push(error);
+            if current_kind(lexer) == TokenKind::BraceRight {
+                break;
+            }
+            skip_list_separator(lexer);
+            continue;
+        };
+
+        fields.push(NestedAssignmentField {
+            name,
+            value,
+            span: field_anchor.elapsed(lexer),
+        });
+
+        if current_kind(lexer) == TokenKind::BraceRight {
+            break;
+        }
+        if !skip_list_separator(lexer) {
+            let error = recover_until(
+                ParseErrorKind::InvalidNestedAssignment,
+                lexer,
+                &[TokenKind::LineFeed, TokenKind::Comma, TokenKind::BraceRight],
+                Expected::Token(TokenKind::Comma),
+                Scope::NestedAssignment,
+                allocator,
+            );
+            errors.push(error);
+            skip_list_separator(lexer);
+        }
+    }
+
+    close_delimiter(
+        lexer,
+        errors,
+        allocator,
+        TokenKind::BraceRight,
+        ParseErrorKind::NonClosedBrace,
+        Scope::NestedAssignment,
+    );
+    Some(allocator.alloc(NestedAssignment {
+        fields: allocator.alloc_slice_fill_iter(fields),
+        span: anchor.elapsed(lexer),
+    }))
 }
 
 fn parse_assert_statement<'input, 'allocator>(
@@ -2098,8 +2226,9 @@ mod tests {
 
     use crate::{
         ast::{
-            AccessOperator, BinaryOperator, ClosureBody, Expression, FunctionAttribute, ImportKind,
-            MutationPolicyKind, Pattern, Statement, TypedefValue, Value,
+            AccessOperator, AssignValue, BinaryOperator, ClosureBody, Expression,
+            FunctionAttribute, ImportKind, MutationPolicyKind, Pattern, Statement, TypedefValue,
+            Value,
         },
         error::ParseErrorKind,
         lexer::Lexer,
@@ -3255,6 +3384,76 @@ let recovered = true
             Some(MutationPolicyKind::Tunable { cost: None })
         ));
         assert!(matches!(ast.statements[2], Statement::LetStatement(_)));
+    }
+
+    #[test]
+    fn parses_nested_assignment_values() {
+        let source = r#"
+programs.firefox = {
+    enable = true,
+    settings = {
+        count = 10,
+    },
+}
+"#;
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert!(errors.is_empty(), "parse errors: {errors:#?}");
+        let [Statement::AssignStatement(assignment)] = ast.statements else {
+            panic!("expected one assignment");
+        };
+        let AssignValue::Nested(value) = assignment.value else {
+            panic!("expected nested assignment");
+        };
+        let [enable, settings] = value.fields else {
+            panic!("expected two fields");
+        };
+        assert_eq!(enable.name.value, "enable");
+        assert!(matches!(enable.value, AssignValue::Expression(_)));
+        assert_eq!(settings.name.value, "settings");
+        let AssignValue::Nested(settings) = settings.value else {
+            panic!("expected nested settings");
+        };
+        assert_eq!(settings.fields[0].name.value, "count");
+    }
+
+    #[test]
+    fn malformed_nested_assignment_recovers_to_following_statements() {
+        let source = r#"
+programs.firefox = {
+    enable true
+    settings = {
+        count = 10
+    }
+}
+programs.other = {
+    enabled = true
+let recovered = false
+"#;
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| { error.kind == ParseErrorKind::InvalidNestedAssignmentField })
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.kind == ParseErrorKind::NonClosedBrace)
+        );
+        assert!(matches!(
+            ast.statements.last(),
+            Some(Statement::LetStatement(_))
+        ));
     }
 
     #[test]

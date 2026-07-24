@@ -1,11 +1,11 @@
 use std::{collections::HashMap, ops::Range};
 
 use light_nix_parser::ast::{
-    AccessOperator, Array, Block, ClosureBody, ClosureExpression, ElseBranchValue, EnumDefine,
-    ExplicitTypeArgument, Expression, FunctionCall, FunctionDefine, GenericParameters,
-    ImplementsDefine, ImportKind, InterfaceDefine, LetStatement, Literal, MatchArm, Pattern,
-    Primary, Source, Statement, Statements, TypeDefine, TypeInfo, TypedefBlock, TypedefValue,
-    Value, WhereClause,
+    AccessOperator, Array, AssignValue, Block, ClosureBody, ClosureExpression, ElseBranchValue,
+    EnumDefine, ExplicitTypeArgument, Expression, FunctionCall, FunctionDefine, GenericParameters,
+    ImplementsDefine, ImportKind, InterfaceDefine, LetStatement, Literal, MatchArm,
+    NestedAssignment, Pattern, Primary, Source, Statement, Statements, TypeDefine, TypeInfo,
+    TypedefBlock, TypedefValue, Value, WhereClause,
 };
 
 use crate::{
@@ -1082,7 +1082,7 @@ impl<'ast, 'input, 'allocator> CollectedModule<'ast, 'input, 'allocator> {
             }
             Statement::AssignStatement(node) => {
                 self.resolve_expression(node.target, scope, imports);
-                self.resolve_expression(node.value, scope, imports);
+                self.resolve_assign_value(&node.value, scope, imports);
             }
             Statement::FunctionDefine(node) => {
                 self.check_nested_export(node.exported, module_scope, node.span.clone());
@@ -1091,6 +1091,42 @@ impl<'ast, 'input, 'allocator> CollectedModule<'ast, 'input, 'allocator> {
             Statement::Expression(expression) => {
                 self.resolve_expression(expression, scope, imports);
             }
+        }
+    }
+
+    fn resolve_assign_value(
+        &mut self,
+        value: &'ast AssignValue<'input, 'allocator>,
+        scope: ScopeId,
+        imports: &ImportEnvironment,
+    ) {
+        match value {
+            AssignValue::Expression(expression) => {
+                self.resolve_expression(expression, scope, imports);
+            }
+            AssignValue::Nested(nested) => self.resolve_nested_assignment(nested, scope, imports),
+        }
+    }
+
+    fn resolve_nested_assignment(
+        &mut self,
+        nested: &'ast NestedAssignment<'input, 'allocator>,
+        scope: ScopeId,
+        imports: &ImportEnvironment,
+    ) {
+        let mut fields = HashMap::new();
+        for field in nested.fields {
+            let name = self.names.intern(field.name.value);
+            if let Some(first) = fields.insert(name, field.name.span.clone()) {
+                self.errors.push(NameResolveError {
+                    kind: NameResolveErrorKind::DuplicateField { name, first },
+                    span: field.name.span.clone(),
+                });
+                self.record_reference(&field.name, Res::Error);
+            } else {
+                self.record_reference(&field.name, Res::Member(name));
+            }
+            self.resolve_assign_value(&field.value, scope, imports);
         }
     }
 

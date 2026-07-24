@@ -1,7 +1,7 @@
 use light_nix::{
     AnalysisEnvironment, Goal, PlanOutcome, PlanningRequest, analyze_module,
     evaluator::{EvaluationInputs, RuntimeValue},
-    ir::{Constant, VariableSource},
+    ir::{Constant, MutationPolicy, VariableSource},
     name_resolver::ModuleId,
     parser::ast::AstArena,
 };
@@ -94,6 +94,80 @@ environment.packages = packages
     );
     assert!(plan.side_effects().next().is_none());
     assert!(!plan.requires_confirmation());
+}
+
+#[test]
+fn nested_assignment_is_lowered_to_leaf_outputs() {
+    let source = r#"
+type FirefoxSettings {
+    count: Int
+}
+type Firefox {
+    tunable(cost = 5) enable: Bool
+    settings: FirefoxSettings
+}
+type Programs {
+    firefox: Firefox
+}
+let tunable(cost = 2) firefoxEnabled = false
+declare let programs: Programs
+programs.firefox = {
+    enable = firefoxEnabled,
+    settings = {
+        count = 10,
+    },
+}
+"#;
+    let arena = AstArena::new();
+    let analysis = analyze_module(source, &arena, ModuleId(0), &AnalysisEnvironment::default());
+    assert!(
+        analysis.is_success(),
+        "parse={:?}\nname={:?}\ntype={:?}\ndependency={:?}\nlower={:?}",
+        analysis.parse_errors(),
+        analysis.name_errors(),
+        analysis.type_errors(),
+        analysis.dependency_errors(),
+        analysis.lower_errors(),
+    );
+    assert_eq!(analysis.model().paths().count(), 2);
+    let enabled = analysis
+        .output_path("programs.firefox.enable")
+        .expect("enable output")
+        .clone();
+    let count = analysis
+        .output_path("programs.firefox.settings.count")
+        .expect("count output")
+        .clone();
+    assert_eq!(
+        analysis.model().path(&enabled).unwrap().policy(),
+        MutationPolicy::Tunable { cost: 5 }
+    );
+    assert_eq!(
+        analysis.model().path(&count).unwrap().policy(),
+        MutationPolicy::Readonly
+    );
+    let mut request = PlanningRequest::new();
+    request.require_output(enabled.clone(), Constant::Bool(true));
+
+    let PlanOutcome::Applicable(plan) = analysis
+        .plan(&EvaluationInputs::default(), &request)
+        .unwrap()
+    else {
+        panic!("expected an applicable plan");
+    };
+    assert_eq!(plan.solution().cost, 2);
+    assert_eq!(
+        plan.before().get(&enabled).map(|entry| &entry.value),
+        Some(&RuntimeValue::Bool(false))
+    );
+    assert_eq!(
+        plan.after().get(&enabled).map(|entry| &entry.value),
+        Some(&RuntimeValue::Bool(true))
+    );
+    assert_eq!(
+        plan.after().get(&count).map(|entry| &entry.value),
+        Some(&RuntimeValue::Int(10))
+    );
 }
 
 #[test]
