@@ -2298,7 +2298,7 @@ mod tests {
 
     use crate::{
         ast::{
-            AccessOperator, AssignValue, BinaryOperator, ClosureBody, Expression,
+            AccessOperator, AssignValue, BinaryOperator, ClosureBody, CollectionKind, Expression,
             FunctionAttribute, ImportKind, MutationPolicyKind, Pattern, Statement, TypeOperator,
             TypedefValue, Value,
         },
@@ -2306,6 +2306,44 @@ mod tests {
         lexer::Lexer,
         parser::parse_source,
     };
+
+    #[test]
+    fn list_literals_are_default_and_set_literals_are_explicit() {
+        let source = r#"
+let list = ["firefox", "firefox"]
+let set = @set ["firefox", "firefox"]
+"#;
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert!(errors.is_empty(), "{errors:#?}");
+        let Statement::LetStatement(list) = ast.statements[0] else {
+            panic!("expected list binding");
+        };
+        let Expression::Primary(list) = list.value.unwrap() else {
+            panic!("expected list primary");
+        };
+        let Value::Array(list) = &list.value else {
+            panic!("expected list literal");
+        };
+        assert_eq!(list.kind, CollectionKind::List);
+        assert_eq!(list.values.len(), 2);
+
+        let Statement::LetStatement(set) = ast.statements[1] else {
+            panic!("expected set binding");
+        };
+        let Expression::Primary(set) = set.value.unwrap() else {
+            panic!("expected set primary");
+        };
+        let Value::Array(set) = &set.value else {
+            panic!("expected set literal");
+        };
+        assert_eq!(set.kind, CollectionKind::Set);
+        assert_eq!(set.values.len(), 2);
+        assert_eq!(&source[set.span.clone()], r#"@set ["firefox", "firefox"]"#);
+    }
 
     #[test]
     fn parses_the_complete_grammar() {

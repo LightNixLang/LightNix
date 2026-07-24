@@ -474,14 +474,16 @@ fn goal_is_satisfied(snapshot: &EvaluationSnapshot, goal: &Goal) -> bool {
         }),
         Goal::Absent { path } => snapshot.get(path).is_none(),
         Goal::Contains { path, value } => snapshot.get(path).is_some_and(|entry| {
-            let RuntimeValue::Set(values) = &entry.value else {
-                return false;
+            let values = match &entry.value {
+                RuntimeValue::List(values) | RuntimeValue::Set(values) => values,
+                _ => return false,
             };
             constant_to_runtime(value).is_ok_and(|value| values.contains(&value))
         }),
         Goal::NotContains { path, value } => snapshot.get(path).is_some_and(|entry| {
-            let RuntimeValue::Set(values) = &entry.value else {
-                return false;
+            let values = match &entry.value {
+                RuntimeValue::List(values) | RuntimeValue::Set(values) => values,
+                _ => return false,
             };
             constant_to_runtime(value).is_ok_and(|value| !values.contains(&value))
         }),
@@ -508,6 +510,11 @@ fn runtime_to_constant(value: &RuntimeValue) -> Option<Constant> {
         RuntimeValue::Int(value) => Some(Constant::Int(*value)),
         RuntimeValue::Float(value) => Some(Constant::Float(*value)),
         RuntimeValue::String(value) => Some(Constant::String(value.clone())),
+        RuntimeValue::List(values) => values
+            .iter()
+            .map(runtime_to_constant)
+            .collect::<Option<Vec<_>>>()
+            .map(Constant::List),
         RuntimeValue::Set(values) => values
             .iter()
             .map(runtime_to_constant)
@@ -539,6 +546,12 @@ fn constant_to_runtime(value: &Constant) -> Result<RuntimeValue, PlanError> {
         Constant::Int(value) => RuntimeValue::Int(*value),
         Constant::Float(value) => RuntimeValue::Float(*value),
         Constant::String(value) => RuntimeValue::String(value.clone()),
+        Constant::List(values) => RuntimeValue::List(
+            values
+                .iter()
+                .map(constant_to_runtime)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
         Constant::Set(values) => RuntimeValue::Set(
             values
                 .iter()

@@ -741,11 +741,18 @@ impl_ast!(impl<'input, 'allocator> for SomeValue<'input, 'allocator>);
 
 #[derive(Debug)]
 pub struct Array<'input, 'allocator> {
+    pub kind: CollectionKind,
     pub values: &'allocator [Value<'input, 'allocator>],
     pub span: Range<usize>,
 }
 
 impl_ast!(impl<'input, 'allocator> for Array<'input, 'allocator>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CollectionKind {
+    List,
+    Set,
+}
 
 #[derive(Debug)]
 pub struct FunctionCall<'input, 'allocator> {

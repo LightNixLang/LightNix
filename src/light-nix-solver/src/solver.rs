@@ -33,6 +33,10 @@ enum EncodedValue {
     Real(Real),
     String(Z3String),
     Enum(Int),
+    List {
+        element_type: Type,
+        elements: Vec<EncodedListElement>,
+    },
     Set {
         element_type: Type,
         universe: Vec<Constant>,
@@ -53,6 +57,12 @@ enum EncodedValue {
         body: ExpressionId,
         ty: Type,
     },
+}
+
+#[derive(Clone)]
+struct EncodedListElement {
+    present: Bool,
+    value: EncodedValue,
 }
 
 #[derive(Clone)]
@@ -251,12 +261,16 @@ impl<'a> Encoder<'a> {
                     .source
                     .path(path)
                     .ok_or_else(|| error(SolveErrorKind::UnknownOutput(path.clone())))?;
-                let Type::Set(element_type) = declaration.ty() else {
-                    return Err(self
-                        .type_error(&Type::Set(Box::new(Type::Error)), declaration.ty().clone()));
+                let element_type = match declaration.ty() {
+                    Type::List(element_type) | Type::Set(element_type) => element_type,
+                    found => {
+                        return Err(
+                            self.type_error(&Type::Set(Box::new(Type::Error)), found.clone())
+                        );
+                    }
                 };
                 let output = self.encode_output(path)?;
-                let member = self.set_contains(&output.actual_value, element_type, value)?;
+                let member = self.collection_contains(&output.actual_value, element_type, value)?;
                 if matches!(goal, OutputGoal::Contains { .. }) {
                     Bool::and(&[output.actual_present, member])
                 } else {
@@ -301,31 +315,39 @@ impl<'a> Encoder<'a> {
         Ok(())
     }
 
-    fn set_contains(
+    fn collection_contains(
         &self,
-        set: &EncodedValue,
+        collection: &EncodedValue,
         element_type: &Type,
         value: &Constant,
     ) -> Result<Bool, SolveError> {
-        let EncodedValue::Set {
-            universe, members, ..
-        } = set
-        else {
-            return Err(self.type_error(
-                &Type::Set(Box::new(element_type.clone())),
-                encoded_type(set),
-            ));
-        };
         let value = self.encode_constant(element_type, value)?;
-        let alternatives = universe
-            .iter()
-            .zip(members)
-            .map(|(candidate, member)| {
-                let candidate = self.encode_constant(element_type, candidate)?;
-                let equal = self.value_eq(&value, &candidate)?;
-                Ok(Bool::and(&[member.clone(), equal]))
-            })
-            .collect::<Result<Vec<_>, SolveError>>()?;
+        let alternatives = match collection {
+            EncodedValue::List { elements, .. } => elements
+                .iter()
+                .map(|element| {
+                    let equal = self.value_eq(&value, &element.value)?;
+                    Ok(Bool::and(&[element.present.clone(), equal]))
+                })
+                .collect::<Result<Vec<_>, SolveError>>()?,
+            EncodedValue::Set {
+                universe, members, ..
+            } => universe
+                .iter()
+                .zip(members)
+                .map(|(candidate, member)| {
+                    let candidate = self.encode_constant(element_type, candidate)?;
+                    let equal = self.value_eq(&value, &candidate)?;
+                    Ok(Bool::and(&[member.clone(), equal]))
+                })
+                .collect::<Result<Vec<_>, SolveError>>()?,
+            other => {
+                return Err(self.type_error(
+                    &Type::Set(Box::new(element_type.clone())),
+                    encoded_type(other),
+                ));
+            }
+        };
         Ok(bool_or(alternatives))
     }
 
@@ -433,6 +455,7 @@ impl<'a> Encoder<'a> {
                 self.optimize.assert(&output.actual_present);
                 Ok(output.actual_value)
             }
+            ExpressionKind::List(values) => self.encode_list_expression(expression.ty(), values),
             ExpressionKind::Set(values) => self.encode_set_expression(expression.ty(), values),
             ExpressionKind::Some(value) => Ok(EncodedValue::Optional {
                 present: Bool::from_bool(true),
@@ -685,6 +708,29 @@ impl<'a> Encoder<'a> {
         Ok(state)
     }
 
+    fn encode_list_expression(
+        &mut self,
+        ty: &Type,
+        values: &[ExpressionId],
+    ) -> Result<EncodedValue, SolveError> {
+        let Type::List(element_type) = ty else {
+            return Err(self.type_error(&Type::List(Box::new(Type::Error)), ty.clone()));
+        };
+        let elements = values
+            .iter()
+            .map(|value| {
+                Ok(EncodedListElement {
+                    present: Bool::from_bool(true),
+                    value: self.encode_expression(*value)?,
+                })
+            })
+            .collect::<Result<Vec<_>, SolveError>>()?;
+        Ok(EncodedValue::List {
+            element_type: element_type.as_ref().clone(),
+            elements,
+        })
+    }
+
     fn encode_set_expression(
         &mut self,
         ty: &Type,
@@ -745,23 +791,29 @@ impl<'a> Encoder<'a> {
         match method {
             BuiltinMethod::Contains if arguments.len() == 1 => {
                 let argument = self.encode_expression(arguments[0])?;
-                let EncodedValue::Set {
-                    element_type,
-                    universe,
-                    members,
-                } = receiver
-                else {
-                    return Err(error(SolveErrorKind::UnsupportedBuiltin(method)));
+                let alternatives = match receiver {
+                    EncodedValue::List { elements, .. } => elements
+                        .into_iter()
+                        .map(|element| {
+                            let equal = self.value_eq(&argument, &element.value)?;
+                            Ok(Bool::and(&[element.present, equal]))
+                        })
+                        .collect::<Result<Vec<_>, SolveError>>()?,
+                    EncodedValue::Set {
+                        element_type,
+                        universe,
+                        members,
+                    } => universe
+                        .iter()
+                        .zip(members)
+                        .map(|(candidate, member)| {
+                            let candidate = self.encode_constant(&element_type, candidate)?;
+                            let equal = self.value_eq(&argument, &candidate)?;
+                            Ok(Bool::and(&[member, equal]))
+                        })
+                        .collect::<Result<Vec<_>, SolveError>>()?,
+                    _ => return Err(error(SolveErrorKind::UnsupportedBuiltin(method))),
                 };
-                let alternatives = universe
-                    .iter()
-                    .zip(members)
-                    .map(|(candidate, member)| {
-                        let candidate = self.encode_constant(&element_type, candidate)?;
-                        let equal = self.value_eq(&argument, &candidate)?;
-                        Ok(Bool::and(&[member, equal]))
-                    })
-                    .collect::<Result<Vec<_>, SolveError>>()?;
                 Ok(EncodedValue::Bool(bool_or(alternatives)))
             }
             BuiltinMethod::Filter if arguments.len() == 1 => {
@@ -806,30 +858,55 @@ impl<'a> Encoder<'a> {
         receiver: EncodedValue,
         closure: EncodedValue,
     ) -> Result<EncodedValue, SolveError> {
-        let EncodedValue::Set {
-            element_type,
-            universe,
-            members,
-        } = receiver
-        else {
-            return Err(error(SolveErrorKind::UnsupportedBuiltin(
-                BuiltinMethod::Filter,
-            )));
-        };
         let dependencies = self.opaque_dependencies(call, receiver_id, &closure);
-        let mut filtered = Vec::with_capacity(universe.len());
-        for (index, (candidate, member)) in universe.iter().zip(members).enumerate() {
-            let candidate = self.encode_constant(&element_type, candidate)?;
-            let predicate =
-                self.apply_closure(call, &closure, vec![candidate], &dependencies, index)?;
-            let predicate = self.expect_bool(predicate)?;
-            filtered.push(Bool::and(&[member, predicate]));
+        match receiver {
+            EncodedValue::List {
+                element_type,
+                elements,
+            } => {
+                let mut filtered = Vec::with_capacity(elements.len());
+                for (index, element) in elements.into_iter().enumerate() {
+                    let predicate = self.apply_closure(
+                        call,
+                        &closure,
+                        vec![element.value.clone()],
+                        &dependencies,
+                        index,
+                    )?;
+                    let predicate = self.expect_bool(predicate)?;
+                    filtered.push(EncodedListElement {
+                        present: Bool::and(&[element.present, predicate]),
+                        value: element.value,
+                    });
+                }
+                Ok(EncodedValue::List {
+                    element_type,
+                    elements: filtered,
+                })
+            }
+            EncodedValue::Set {
+                element_type,
+                universe,
+                members,
+            } => {
+                let mut filtered = Vec::with_capacity(universe.len());
+                for (index, (candidate, member)) in universe.iter().zip(members).enumerate() {
+                    let candidate = self.encode_constant(&element_type, candidate)?;
+                    let predicate =
+                        self.apply_closure(call, &closure, vec![candidate], &dependencies, index)?;
+                    let predicate = self.expect_bool(predicate)?;
+                    filtered.push(Bool::and(&[member, predicate]));
+                }
+                Ok(EncodedValue::Set {
+                    element_type,
+                    universe,
+                    members: filtered,
+                })
+            }
+            _ => Err(error(SolveErrorKind::UnsupportedBuiltin(
+                BuiltinMethod::Filter,
+            ))),
         }
-        Ok(EncodedValue::Set {
-            element_type,
-            universe,
-            members: filtered,
-        })
     }
 
     fn encode_map(
@@ -840,6 +917,29 @@ impl<'a> Encoder<'a> {
         closure: EncodedValue,
         result_type: &Type,
     ) -> Result<EncodedValue, SolveError> {
+        if let (EncodedValue::List { elements, .. }, Type::List(result_element)) =
+            (&receiver, result_type)
+        {
+            let dependencies = self.opaque_dependencies(call, receiver_id, &closure);
+            let mut mapped = Vec::with_capacity(elements.len());
+            for (index, element) in elements.iter().enumerate() {
+                mapped.push(EncodedListElement {
+                    present: element.present.clone(),
+                    value: self.apply_closure(
+                        call,
+                        &closure,
+                        vec![element.value.clone()],
+                        &dependencies,
+                        index,
+                    )?,
+                });
+            }
+            return Ok(EncodedValue::List {
+                element_type: result_element.as_ref().clone(),
+                elements: mapped,
+            });
+        }
+
         let EncodedValue::Set {
             element_type,
             universe: input_universe,
@@ -976,7 +1076,7 @@ impl<'a> Encoder<'a> {
             ExpressionKind::Variable(variable) => {
                 dependencies.insert(*variable);
             }
-            ExpressionKind::Set(values) => {
+            ExpressionKind::List(values) | ExpressionKind::Set(values) => {
                 for value in values {
                     self.collect_expression_variables(*value, dependencies, visiting);
                 }
@@ -1279,6 +1379,21 @@ impl<'a> Encoder<'a> {
             (Type::Named(_, _), Constant::Enum(variant)) => {
                 EncodedValue::Enum(Int::from_u64(variant_number(*variant)))
             }
+            (Type::List(element_type), Constant::List(values)) => {
+                let elements = values
+                    .iter()
+                    .map(|value| {
+                        Ok(EncodedListElement {
+                            present: Bool::from_bool(true),
+                            value: self.encode_constant(element_type, value)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, SolveError>>()?;
+                EncodedValue::List {
+                    element_type: element_type.as_ref().clone(),
+                    elements,
+                }
+            }
             (Type::Set(element_type), Constant::Set(values)) => {
                 if !values
                     .iter()
@@ -1348,6 +1463,55 @@ impl<'a> Encoder<'a> {
         Ok(encoded)
     }
 
+    fn list_capacity(&self, ty: &Type) -> usize {
+        let Type::List(element_type) = ty else {
+            return 0;
+        };
+        let mut capacity = self
+            .source
+            .expressions()
+            .filter(|expression| expression.ty() == ty)
+            .filter_map(|expression| match expression.kind() {
+                ExpressionKind::List(values) => Some(values.len()),
+                ExpressionKind::Constant(Constant::List(values)) => Some(values.len()),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        let mut observable_values = Vec::new();
+        for expression in self.source.expressions() {
+            if expression.ty() == element_type.as_ref()
+                && let ExpressionKind::Constant(value) = expression.kind()
+                && !observable_values
+                    .iter()
+                    .any(|candidate| constants_equal(candidate, value))
+            {
+                observable_values.push(value.clone());
+            }
+        }
+        capacity = capacity.max(observable_values.len());
+        for value in self.request.variable_values().values().chain(
+            self.request
+                .output_values()
+                .values()
+                .filter_map(Option::as_ref),
+        ) {
+            if let Constant::List(values) = value {
+                capacity = capacity.max(values.len());
+            }
+        }
+        for goal in self.request.goals() {
+            if let OutputGoal::Equals {
+                value: Constant::List(values),
+                ..
+            } = goal
+            {
+                capacity = capacity.max(values.len());
+            }
+        }
+        capacity.max(1)
+    }
+
     fn fresh_value(&self, ty: &Type, name: &str) -> Result<EncodedValue, SolveError> {
         match ty {
             Type::Unit => Ok(EncodedValue::Unit),
@@ -1368,6 +1532,25 @@ impl<'a> Encoder<'a> {
                         .collect(),
                 ));
                 Ok(EncodedValue::Enum(value))
+            }
+            Type::List(element_type) => {
+                let capacity = self.list_capacity(ty);
+                let mut elements = Vec::with_capacity(capacity);
+                for index in 0..capacity {
+                    let present = Bool::new_const(format!("{name}_present_{index}"));
+                    if let Some(previous) = elements.last() {
+                        let previous: &EncodedListElement = previous;
+                        self.optimize.assert(present.implies(&previous.present));
+                    }
+                    elements.push(EncodedListElement {
+                        present,
+                        value: self.fresh_value(element_type, &format!("{name}_value_{index}"))?,
+                    });
+                }
+                Ok(EncodedValue::List {
+                    element_type: element_type.as_ref().clone(),
+                    elements,
+                })
             }
             Type::Set(element_type) => {
                 let universe = self.universe(element_type);
@@ -1406,7 +1589,6 @@ impl<'a> Encoder<'a> {
             }
             Type::Error
             | Type::Never
-            | Type::List(_)
             | Type::AttrSet(_)
             | Type::Function(_)
             | Type::Parameter(_)
@@ -1424,6 +1606,10 @@ impl<'a> Encoder<'a> {
                 Z3String::from_str("").expect("empty Z3 string is valid"),
             )),
             Type::Named(_, _) => Ok(EncodedValue::Enum(Int::from_i64(0))),
+            Type::List(element_type) => Ok(EncodedValue::List {
+                element_type: element_type.as_ref().clone(),
+                elements: Vec::new(),
+            }),
             Type::Set(element_type) => {
                 let universe = self.universe(element_type);
                 Ok(EncodedValue::Set {
@@ -1446,7 +1632,6 @@ impl<'a> Encoder<'a> {
             }),
             Type::Error
             | Type::Never
-            | Type::List(_)
             | Type::AttrSet(_)
             | Type::Function(_)
             | Type::Parameter(_)
@@ -1462,6 +1647,16 @@ impl<'a> Encoder<'a> {
             (EncodedValue::Real(left), EncodedValue::Real(right)) => left.eq(right),
             (EncodedValue::String(left), EncodedValue::String(right)) => left.eq(right),
             (EncodedValue::Enum(left), EncodedValue::Enum(right)) => left.eq(right),
+            (
+                EncodedValue::List {
+                    element_type: left_type,
+                    elements: left,
+                },
+                EncodedValue::List {
+                    element_type: right_type,
+                    elements: right,
+                },
+            ) if left_type == right_type => self.list_eq(left, right)?,
             (
                 EncodedValue::Set {
                     element_type: left_type,
@@ -1532,6 +1727,48 @@ impl<'a> Encoder<'a> {
         Ok(result)
     }
 
+    fn list_eq(
+        &self,
+        left: &[EncodedListElement],
+        right: &[EncodedListElement],
+    ) -> Result<Bool, SolveError> {
+        let mut suffixes = vec![vec![Bool::from_bool(false); right.len() + 1]; left.len() + 1];
+        suffixes[left.len()][right.len()] = Bool::from_bool(true);
+        for index in (0..left.len()).rev() {
+            suffixes[index][right.len()] = Bool::and(&[
+                left[index].present.not(),
+                suffixes[index + 1][right.len()].clone(),
+            ]);
+        }
+        for index in (0..right.len()).rev() {
+            suffixes[left.len()][index] = Bool::and(&[
+                right[index].present.not(),
+                suffixes[left.len()][index + 1].clone(),
+            ]);
+        }
+        for left_index in (0..left.len()).rev() {
+            for right_index in (0..right.len()).rev() {
+                let skip_left = Bool::and(&[
+                    left[left_index].present.not(),
+                    suffixes[left_index + 1][right_index].clone(),
+                ]);
+                let skip_right = Bool::and(&[
+                    right[right_index].present.not(),
+                    suffixes[left_index][right_index + 1].clone(),
+                ]);
+                let values = self.value_eq(&left[left_index].value, &right[right_index].value)?;
+                let matched = Bool::and(&[
+                    left[left_index].present.clone(),
+                    right[right_index].present.clone(),
+                    values,
+                    suffixes[left_index + 1][right_index + 1].clone(),
+                ]);
+                suffixes[left_index][right_index] = Bool::or(&[skip_left, skip_right, matched]);
+            }
+        }
+        Ok(suffixes[0][0].clone())
+    }
+
     fn value_ite(
         &self,
         condition: &Bool,
@@ -1554,6 +1791,46 @@ impl<'a> Encoder<'a> {
             }
             (EncodedValue::Enum(left), EncodedValue::Enum(right)) => {
                 EncodedValue::Enum(condition.ite(left, right))
+            }
+            (
+                EncodedValue::List {
+                    element_type: left_type,
+                    elements: left,
+                },
+                EncodedValue::List {
+                    element_type: right_type,
+                    elements: right,
+                },
+            ) if left_type == right_type => {
+                let capacity = left.len().max(right.len());
+                let default = self.default_value(left_type)?;
+                let mut elements = Vec::with_capacity(capacity);
+                for index in 0..capacity {
+                    let left_present = left
+                        .get(index)
+                        .map(|element| element.present.clone())
+                        .unwrap_or_else(|| Bool::from_bool(false));
+                    let right_present = right
+                        .get(index)
+                        .map(|element| element.present.clone())
+                        .unwrap_or_else(|| Bool::from_bool(false));
+                    let left_value = left
+                        .get(index)
+                        .map(|element| &element.value)
+                        .unwrap_or(&default);
+                    let right_value = right
+                        .get(index)
+                        .map(|element| &element.value)
+                        .unwrap_or(&default);
+                    elements.push(EncodedListElement {
+                        present: condition.ite(&left_present, &right_present),
+                        value: self.value_ite(condition, left_value, right_value)?,
+                    });
+                }
+                EncodedValue::List {
+                    element_type: left_type.clone(),
+                    elements,
+                }
             }
             (
                 EncodedValue::Set {
@@ -1624,6 +1901,36 @@ impl<'a> Encoder<'a> {
     fn value_distance(&self, left: &EncodedValue, right: &EncodedValue) -> Result<Int, SolveError> {
         match (left, right) {
             (EncodedValue::Unit, EncodedValue::Unit) => Ok(Int::from_i64(0)),
+            (
+                EncodedValue::List {
+                    element_type: left_type,
+                    elements: left,
+                },
+                EncodedValue::List {
+                    element_type: right_type,
+                    elements: right,
+                },
+            ) if left_type == right_type => {
+                let count = |elements: &[EncodedListElement]| {
+                    let terms = elements
+                        .iter()
+                        .map(|element| element.present.ite(&Int::from_i64(1), &Int::from_i64(0)))
+                        .collect::<Vec<_>>();
+                    if terms.is_empty() {
+                        Int::from_i64(0)
+                    } else {
+                        Int::add(&terms)
+                    }
+                };
+                let difference = Int::sub(&[count(left), count(right)]);
+                let absolute = difference
+                    .ge(Int::from_i64(0))
+                    .ite(&difference, &difference.unary_minus());
+                let unequal = self
+                    .list_eq(left, right)?
+                    .ite(&Int::from_i64(0), &Int::from_i64(1));
+                Ok(Int::add(&[absolute, unequal]))
+            }
             (
                 EncodedValue::Set {
                     element_type: left_type,
@@ -1833,6 +2140,17 @@ impl<'a> Encoder<'a> {
                     .ok_or_else(|| error(SolveErrorKind::ModelValueUnavailable))?;
                 Ok(Constant::Enum(number_variant(number)))
             }
+            EncodedValue::List { elements, .. } => {
+                let values = elements
+                    .iter()
+                    .filter_map(|element| match decode_bool(model, &element.present) {
+                        Ok(true) => Some(self.decode_value(model, &element.value)),
+                        Ok(false) => None,
+                        Err(error) => Some(Err(error)),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Constant::List(values))
+            }
             EncodedValue::Set {
                 universe, members, ..
             } => {
@@ -2001,7 +2319,7 @@ fn collect_goal_constant_universe(
         }
         OutputGoal::Contains { path, value } | OutputGoal::NotContains { path, value } => {
             if let Some(declaration) = model.path(path)
-                && let Type::Set(element) = declaration.ty()
+                && let Type::List(element) | Type::Set(element) = declaration.ty()
             {
                 collect_constant_universe(element, value, universes);
             }
@@ -2023,7 +2341,7 @@ fn collect_goal_enum_universe(
         }
         OutputGoal::Contains { path, value } | OutputGoal::NotContains { path, value } => {
             if let Some(declaration) = model.path(path)
-                && let Type::Set(element) = declaration.ty()
+                && let Type::List(element) | Type::Set(element) = declaration.ty()
             {
                 collect_enum_constant(element, value, universes);
             }
@@ -2046,7 +2364,8 @@ fn collect_enum_constant(ty: &Type, value: &Constant, universes: &mut Vec<(Type,
                 universes[index].1.push(*variant);
             }
         }
-        (Type::Set(element), Constant::Set(values)) => {
+        (Type::List(element), Constant::List(values))
+        | (Type::Set(element), Constant::Set(values)) => {
             for value in values {
                 collect_enum_constant(element, value, universes);
             }
@@ -2119,7 +2438,8 @@ fn collect_constant_universe(
         values.push(value.clone());
     }
     match (ty, value) {
-        (Type::Set(element_type), Constant::Set(values)) => {
+        (Type::List(element_type), Constant::List(values))
+        | (Type::Set(element_type), Constant::Set(values)) => {
             for value in values {
                 collect_constant_universe(element_type, value, universes);
             }
@@ -2284,6 +2604,13 @@ fn constants_equal(left: &Constant, right: &Constant) -> bool {
             (Some(left), Some(right)) => constants_equal(left, right),
             _ => false,
         },
+        (Constant::List(left), Constant::List(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| constants_equal(left, right))
+        }
         (Constant::Set(left), Constant::Set(right)) => {
             left.iter().all(|value| {
                 right
@@ -2306,6 +2633,9 @@ fn constant_matches(value: &Constant, ty: &Type) -> bool {
         | (Constant::String(_), Type::String)
         | (Constant::Enum(_), Type::Named(_, _)) => true,
         (Constant::Float(value), Type::Float) => value.is_finite(),
+        (Constant::List(values), Type::List(element)) => {
+            values.iter().all(|value| constant_matches(value, element))
+        }
         (Constant::Set(values), Type::Set(element)) => {
             values.iter().all(|value| constant_matches(value, element))
         }
@@ -2326,6 +2656,7 @@ fn encoded_type(value: &EncodedValue) -> Type {
         EncodedValue::Real(_) => Type::Float,
         EncodedValue::String(_) => Type::String,
         EncodedValue::Enum(_) => Type::Error,
+        EncodedValue::List { element_type, .. } => Type::List(Box::new(element_type.clone())),
         EncodedValue::Set { element_type, .. } => Type::Set(Box::new(element_type.clone())),
         EncodedValue::Optional { value, .. } => Type::optional(encoded_type(value)),
         EncodedValue::Union { alternatives, .. } => Type::union(alternatives.clone()),

@@ -127,6 +127,8 @@ pub enum TokenKind {
     VerticalLine,
     /// ?
     Question,
+    /// @
+    At,
     /// e.g. 42, 6.3, 5E+2
     NumericLiteral,
     /// e.g. literal
@@ -204,6 +206,7 @@ static TOKENIZERS: &[Tokenizer] = &[
     Tokenizer::Keyword(TokenKind::Semicolon, ";"),
     Tokenizer::Keyword(TokenKind::VerticalLine, "|"),
     Tokenizer::Keyword(TokenKind::Question, "?"),
+    Tokenizer::Keyword(TokenKind::At, "@"),
     // Delimiters
     Tokenizer::Keyword(TokenKind::ParenthesisLeft, "("),
     Tokenizer::Keyword(TokenKind::ParenthesisRight, ")"),

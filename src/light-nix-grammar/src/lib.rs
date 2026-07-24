@@ -136,7 +136,7 @@ mod grammar {
                                  | "true"
                                  | "false"
                                  | "null"
-        array                ::= "[" [ lf ] { value lf_or_comma } "]"
+        array                ::= [ "@" "set" ] "[" [ lf ] { value lf_or_comma } "]"
         some_value           ::= "some" "(" expression ")"
 
         function_call        ::= "(" [ lf ] { expression lf_or_comma } ")"

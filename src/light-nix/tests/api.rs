@@ -66,7 +66,7 @@ fn membership_goal_is_a_low_level_api_for_command_catalogs() {
 type Environment {
     packages: Set<String>
 }
-let tunable(cost = 3) packages = []
+let tunable(cost = 3) packages = @set []
 declare let environment: Environment
 environment.packages = packages
 "#;
@@ -94,6 +94,53 @@ environment.packages = packages
     );
     assert!(plan.side_effects().next().is_none());
     assert!(!plan.requires_confirmation());
+}
+
+#[test]
+fn planning_preserves_list_order_and_duplicate_occurrences() {
+    let source = r#"
+type Environment {
+    arguments: List<String>
+}
+let tunable(cost = 2) value = "before"
+declare let environment: Environment
+environment.arguments = [value, value]
+"#;
+    let arena = AstArena::new();
+    let analysis = analyze_module(source, &arena, ModuleId(0), &AnalysisEnvironment::default());
+    assert!(analysis.is_success());
+    let path = analysis
+        .output_path("environment.arguments")
+        .expect("arguments output")
+        .clone();
+    let mut request = PlanningRequest::new();
+    request.require_output(
+        path.clone(),
+        Constant::List(vec![
+            Constant::String("after".to_owned()),
+            Constant::String("after".to_owned()),
+        ]),
+    );
+
+    let PlanOutcome::Applicable(plan) = analysis
+        .plan(&EvaluationInputs::default(), &request)
+        .unwrap()
+    else {
+        panic!("expected an applicable plan");
+    };
+    assert_eq!(plan.solution().cost, 2);
+    assert_eq!(plan.solution().variables.len(), 1);
+    assert_eq!(
+        plan.solution().variables[0].after,
+        Constant::String("after".to_owned())
+    );
+    assert_eq!(
+        plan.after().get(&path).map(|entry| &entry.value),
+        Some(&RuntimeValue::List(vec![
+            RuntimeValue::String("after".to_owned()),
+            RuntimeValue::String("after".to_owned()),
+        ]))
+    );
 }
 
 #[test]

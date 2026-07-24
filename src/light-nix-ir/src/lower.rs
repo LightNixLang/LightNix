@@ -6,8 +6,9 @@ use light_nix_name_resolver::{
 };
 use light_nix_parser::ast::{
     AST, AccessOperator, AssignValue, BinaryOperator, Block, ClosureBody, ClosureExpression,
-    ElseBranchValue, Expression, FunctionAttribute, LetStatement, Literal, MutationPolicyKind,
-    Pattern, Primary, Source, Statement, Statements, TypeOperator, UnaryOperator, Value,
+    CollectionKind, ElseBranchValue, Expression, FunctionAttribute, LetStatement, Literal,
+    MutationPolicyKind, Pattern, Primary, Source, Statement, Statements, TypeOperator,
+    UnaryOperator, Value,
 };
 use light_nix_type_checker::{MemberResolution, Type, TypeCheckResult};
 
@@ -1062,12 +1063,16 @@ impl<'ast, 'input, 'allocator, 'context> Lowerer<'ast, 'input, 'allocator, 'cont
         let origin = Some(self.origin(value.span()));
         match value {
             Value::Array(array) => {
-                let Type::Set(element) = &ty else {
-                    self.error(LowerErrorKind::UnsupportedExpression, value.span());
-                    return LoweredValue {
-                        expression: self.unreachable(ty, value.span()),
-                        path: None,
-                    };
+                let element = match (array.kind, &ty) {
+                    (CollectionKind::List, Type::List(element))
+                    | (CollectionKind::Set, Type::Set(element)) => element,
+                    _ => {
+                        self.error(LowerErrorKind::UnsupportedExpression, value.span());
+                        return LoweredValue {
+                            expression: self.unreachable(ty, value.span()),
+                            path: None,
+                        };
+                    }
                 };
                 let values = array
                     .values
@@ -1077,7 +1082,14 @@ impl<'ast, 'input, 'allocator, 'context> Lowerer<'ast, 'input, 'allocator, 'cont
                             .expression
                     })
                     .collect();
-                let result = self.builder.set(element.as_ref().clone(), values, origin);
+                let result = match array.kind {
+                    CollectionKind::List => {
+                        self.builder.list(element.as_ref().clone(), values, origin)
+                    }
+                    CollectionKind::Set => {
+                        self.builder.set(element.as_ref().clone(), values, origin)
+                    }
+                };
                 LoweredValue {
                     expression: self.finish_expression(result, ty, value.span()),
                     path: None,
@@ -1685,7 +1697,7 @@ mod tests {
         };
         match expression.kind() {
             ExpressionKind::Variable(found) => *found == variable,
-            ExpressionKind::Set(values) => values
+            ExpressionKind::List(values) | ExpressionKind::Set(values) => values
                 .iter()
                 .any(|value| contains_variable(model, *value, variable)),
             ExpressionKind::Some(value)
@@ -1888,7 +1900,7 @@ type Programs {
     enabled: Bool
     selected: Int
 }
-let tunable packages = ["firefox", "kitty"]
+let tunable packages = @set ["firefox", "kitty"]
 let has_firefox = packages.contains("firefox")
 let optional: Int? = some(1)
 let selected = match optional {
@@ -1944,7 +1956,7 @@ type Programs {
     filtered: Set<Int>
     mapped: Set<Int>
 }
-let values = [1, 2, 3]
+let values = @set [1, 2, 3]
 let filtered = values.filter(inline |value| => value > 1)
 let mapped = values.map(opaque |value: Int| -> Int => {
     return value + 1

@@ -10,6 +10,7 @@ pub enum RuntimeValue {
     Int(i64),
     Float(f64),
     String(String),
+    List(Vec<RuntimeValue>),
     Set(Vec<RuntimeValue>),
     AttrSet(BTreeMap<String, RuntimeValue>),
     Optional(Option<Box<RuntimeValue>>),
@@ -29,6 +30,7 @@ impl PartialEq for RuntimeValue {
             (Self::Int(left), Self::Int(right)) => left == right,
             (Self::Float(left), Self::Float(right)) => left == right,
             (Self::String(left), Self::String(right)) => left == right,
+            (Self::List(left), Self::List(right)) => left == right,
             (Self::Set(left), Self::Set(right)) => {
                 left.iter()
                     .all(|value| right.iter().any(|other| value == other))
@@ -99,6 +101,18 @@ mod tests {
         assert_eq!(
             RuntimeValue::Set(vec![RuntimeValue::Int(1), RuntimeValue::Int(1)]),
             RuntimeValue::Set(vec![RuntimeValue::Int(1)])
+        );
+    }
+
+    #[test]
+    fn lists_compare_with_order_and_multiplicity() {
+        assert_ne!(
+            RuntimeValue::List(vec![RuntimeValue::Int(1), RuntimeValue::Int(2)]),
+            RuntimeValue::List(vec![RuntimeValue::Int(2), RuntimeValue::Int(1)])
+        );
+        assert_ne!(
+            RuntimeValue::List(vec![RuntimeValue::Int(1), RuntimeValue::Int(1)]),
+            RuntimeValue::List(vec![RuntimeValue::Int(1)])
         );
     }
 }

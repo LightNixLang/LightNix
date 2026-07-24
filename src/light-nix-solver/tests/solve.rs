@@ -505,9 +505,66 @@ programs.enabled = values.filter(inline |value: Int| => value > 0).contains(1)
     assert_eq!(solution.variables[0].source, VariableSource::Symbol(values));
     assert_eq!(
         solution.variables[0].after,
-        Constant::Set(vec![Constant::Int(1)])
+        Constant::List(vec![Constant::Int(1)])
     );
     assert!(solution.opaque_impacts.is_empty());
+}
+
+#[test]
+fn tunable_lists_can_grow_to_cover_distinct_observable_values() {
+    let source = r#"
+type Programs {
+    enabled: Bool
+}
+let tunable(cost = 4) values = []
+declare let programs: Programs
+programs.enabled = values.contains(1) and values.contains(2)
+"#;
+    let arena = AstArena::new();
+    let ast = parse(source, &arena);
+    let resolution = collect_module(ast, ModuleId(0)).resolve(&ImportEnvironment::default());
+    assert!(resolution.errors().is_empty(), "{:#?}", resolution.errors());
+    let types = check_module(ast, &resolution, &TypeEnvironment::default());
+    assert!(types.errors().is_empty(), "{:#?}", types.errors());
+    let lowered = lower_module(ast, &resolution, &types);
+    assert!(lowered.errors().is_empty(), "{:#?}", lowered.errors());
+
+    let Statement::TypeDefine(programs_type) = ast.statements[0] else {
+        panic!("expected Programs type");
+    };
+    let Statement::LetStatement(values_binding) = ast.statements[1] else {
+        panic!("expected values binding");
+    };
+    let Statement::LetStatement(programs_binding) = ast.statements[2] else {
+        panic!("expected programs binding");
+    };
+    let values = symbol_of(&resolution, &values_binding.name);
+    let programs = symbol_of(&resolution, &programs_binding.name);
+    let enabled = field_named(
+        &resolution,
+        type_of(&resolution, &programs_type.name),
+        "enabled",
+    );
+    let mut request = SolveRequest::new();
+    request.require_output(
+        OutputPath::root(programs).field(enabled),
+        Constant::Bool(true),
+    );
+
+    let SolveOutcome::Sat(solution) = solve(lowered.model(), &request).unwrap() else {
+        panic!("expected a solution");
+    };
+    let change = solution
+        .variables
+        .iter()
+        .find(|change| change.source == VariableSource::Symbol(values))
+        .expect("list variable change");
+    let Constant::List(after) = &change.after else {
+        panic!("expected list value");
+    };
+    assert_eq!(after.len(), 2);
+    assert!(after.contains(&Constant::Int(1)));
+    assert!(after.contains(&Constant::Int(2)));
 }
 
 #[test]
@@ -560,6 +617,57 @@ programs.enabled = values.map(inline |value| => value + offset).contains(3)
     assert_eq!(solution.variables[0].source, VariableSource::Symbol(offset));
     assert_eq!(solution.variables[0].after, Constant::Int(2));
     assert!(solution.opaque_impacts.is_empty());
+}
+
+#[test]
+fn list_constraints_preserve_order_and_duplicate_occurrences() {
+    let source = r#"
+type Programs {
+    values: List<Int>
+}
+let tunable(cost = 5) offset = 0
+let values = [1, 1, 2]
+declare let programs: Programs
+programs.values = values.map(inline |value| => value + offset)
+"#;
+    let arena = AstArena::new();
+    let ast = parse(source, &arena);
+    let resolution = collect_module(ast, ModuleId(0)).resolve(&ImportEnvironment::default());
+    assert!(resolution.errors().is_empty(), "{:#?}", resolution.errors());
+    let types = check_module(ast, &resolution, &TypeEnvironment::default());
+    assert!(types.errors().is_empty(), "{:#?}", types.errors());
+    let lowered = lower_module(ast, &resolution, &types);
+    assert!(lowered.errors().is_empty(), "{:#?}", lowered.errors());
+
+    let Statement::TypeDefine(programs_type) = ast.statements[0] else {
+        panic!("expected Programs type");
+    };
+    let Statement::LetStatement(offset_binding) = ast.statements[1] else {
+        panic!("expected offset binding");
+    };
+    let Statement::LetStatement(programs_binding) = ast.statements[3] else {
+        panic!("expected programs binding");
+    };
+    let offset = symbol_of(&resolution, &offset_binding.name);
+    let programs = symbol_of(&resolution, &programs_binding.name);
+    let values = field_named(
+        &resolution,
+        type_of(&resolution, &programs_type.name),
+        "values",
+    );
+    let mut request = SolveRequest::new();
+    request.require_output(
+        OutputPath::root(programs).field(values),
+        Constant::List(vec![Constant::Int(2), Constant::Int(2), Constant::Int(3)]),
+    );
+
+    let SolveOutcome::Sat(solution) = solve(lowered.model(), &request).unwrap() else {
+        panic!("expected a solution");
+    };
+    assert_eq!(solution.cost, 5);
+    assert_eq!(solution.variables.len(), 1);
+    assert_eq!(solution.variables[0].source, VariableSource::Symbol(offset));
+    assert_eq!(solution.variables[0].after, Constant::Int(1));
 }
 
 #[test]

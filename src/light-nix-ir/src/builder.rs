@@ -178,6 +178,22 @@ impl ModelBuilder {
         )
     }
 
+    pub fn list(
+        &mut self,
+        element_type: Type,
+        values: Vec<ExpressionId>,
+        origin: Option<SourceOrigin>,
+    ) -> Result<ExpressionId, BuildError> {
+        for value in &values {
+            self.require_type(*value, &element_type)?;
+        }
+        self.push_expression(
+            Type::List(Box::new(element_type)),
+            ExpressionKind::List(values),
+            origin,
+        )
+    }
+
     pub fn some(
         &mut self,
         value: ExpressionId,
@@ -623,6 +639,9 @@ fn constant_matches(value: &Constant, ty: &Type) -> bool {
         (Constant::Int(_), Type::Int) => true,
         (Constant::Float(value), Type::Float) => value.is_finite(),
         (Constant::String(_), Type::String) => true,
+        (Constant::List(values), Type::List(element)) => {
+            values.iter().all(|value| constant_matches(value, element))
+        }
         (Constant::Set(values), Type::Set(element)) => {
             values.iter().all(|value| constant_matches(value, element))
         }

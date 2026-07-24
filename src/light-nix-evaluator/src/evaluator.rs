@@ -5,9 +5,9 @@ use light_nix_name_resolver::{
 };
 use light_nix_parser::ast::{
     AST, AccessOperator, Array, AssignValue, BinaryOperator, Block, ClosureBody, ClosureExpression,
-    ElseBranchValue, Expression, FunctionAttribute, FunctionCall, FunctionDefine, LetStatement,
-    Literal, MatchArm, MutationPolicyKind, Pattern, Primary, PrimaryAccess, Source, Statement,
-    Statements, TypeOperator, UnaryOperator, Value,
+    CollectionKind, ElseBranchValue, Expression, FunctionAttribute, FunctionCall, FunctionDefine,
+    LetStatement, Literal, MatchArm, MutationPolicyKind, Pattern, Primary, PrimaryAccess, Source,
+    Statement, Statements, TypeOperator, UnaryOperator, Value,
 };
 use light_nix_type_checker::{BuiltinMethod, MemberResolution, Type, TypeCheckResult};
 
@@ -612,6 +612,9 @@ impl<'ast, 'input, 'allocator, 'context, 'inputs>
             (RuntimeValue::Int(_), Type::Int) => true,
             (RuntimeValue::Float(_), Type::Float) => true,
             (RuntimeValue::String(_), Type::String) => true,
+            (RuntimeValue::List(values), Type::List(element)) => values
+                .iter()
+                .all(|value| self.runtime_matches_type(value, element)),
             (RuntimeValue::Set(values), Type::Set(element)) => values
                 .iter()
                 .all(|value| self.runtime_matches_type(value, element)),
@@ -850,12 +853,17 @@ impl<'ast, 'input, 'allocator, 'context, 'inputs>
             let value = self.eval_value(value)?;
             dependencies.extend(value.dependencies);
             opaque_dependencies.extend(value.opaque_dependencies);
-            if !values.contains(&value.value) {
-                values.push(value.value);
+            match array.kind {
+                CollectionKind::List => values.push(value.value),
+                CollectionKind::Set if !values.contains(&value.value) => values.push(value.value),
+                CollectionKind::Set => {}
             }
         }
         Ok(TrackedValue {
-            value: RuntimeValue::Set(values),
+            value: match array.kind {
+                CollectionKind::List => RuntimeValue::List(values),
+                CollectionKind::Set => RuntimeValue::Set(values),
+            },
             dependencies,
             opaque_dependencies,
             path: None,
@@ -1236,8 +1244,9 @@ impl<'ast, 'input, 'allocator, 'context, 'inputs>
                 let [needle] = arguments.as_slice() else {
                     return self.fail(EvaluationErrorKind::InvalidBuiltinCall, span);
                 };
-                let RuntimeValue::Set(values) = receiver.value else {
-                    return self.fail(EvaluationErrorKind::InvalidBuiltinCall, span);
+                let values = match receiver.value {
+                    RuntimeValue::List(values) | RuntimeValue::Set(values) => values,
+                    _ => return self.fail(EvaluationErrorKind::InvalidBuiltinCall, span),
                 };
                 RuntimeValue::Bool(values.contains(&needle.value))
             }
@@ -1245,8 +1254,10 @@ impl<'ast, 'input, 'allocator, 'context, 'inputs>
                 let [predicate] = arguments.as_slice() else {
                     return self.fail(EvaluationErrorKind::InvalidBuiltinCall, span);
                 };
-                let RuntimeValue::Set(values) = receiver.value else {
-                    return self.fail(EvaluationErrorKind::InvalidBuiltinCall, span);
+                let (values, is_list) = match receiver.value {
+                    RuntimeValue::List(values) => (values, true),
+                    RuntimeValue::Set(values) => (values, false),
+                    _ => return self.fail(EvaluationErrorKind::InvalidBuiltinCall, span),
                 };
                 let mut filtered = Vec::new();
                 for value in values {
@@ -1267,14 +1278,20 @@ impl<'ast, 'input, 'allocator, 'context, 'inputs>
                         filtered.push(value);
                     }
                 }
-                RuntimeValue::Set(filtered)
+                if is_list {
+                    RuntimeValue::List(filtered)
+                } else {
+                    RuntimeValue::Set(filtered)
+                }
             }
             BuiltinMethod::Map => {
                 let [mapper] = arguments.as_slice() else {
                     return self.fail(EvaluationErrorKind::InvalidBuiltinCall, span);
                 };
-                let RuntimeValue::Set(values) = receiver.value else {
-                    return self.fail(EvaluationErrorKind::InvalidBuiltinCall, span);
+                let (values, is_list) = match receiver.value {
+                    RuntimeValue::List(values) => (values, true),
+                    RuntimeValue::Set(values) => (values, false),
+                    _ => return self.fail(EvaluationErrorKind::InvalidBuiltinCall, span),
                 };
                 let mut mapped = Vec::new();
                 for value in values {
@@ -1288,11 +1305,15 @@ impl<'ast, 'input, 'allocator, 'context, 'inputs>
                         self.call_runtime_function(mapper.clone(), vec![argument], span.clone())?;
                     dependencies.extend(result.dependencies.iter().copied());
                     opaque_dependencies.extend(result.opaque_dependencies.iter().copied());
-                    if !mapped.contains(&result.value) {
+                    if is_list || !mapped.contains(&result.value) {
                         mapped.push(result.value);
                     }
                 }
-                RuntimeValue::Set(mapped)
+                if is_list {
+                    RuntimeValue::List(mapped)
+                } else {
+                    RuntimeValue::Set(mapped)
+                }
             }
             BuiltinMethod::ToFloat => match receiver.value {
                 RuntimeValue::Int(value) if arguments.is_empty() => {
@@ -1919,7 +1940,7 @@ opaque function stringify(value: Int) -> String {
     return value.to_string()
 }
 let tunable n = 1
-let values = [n, 2, 2]
+let values = @set [n, 2, 2]
 let mapped = values.map(stringify)
 declare let programs: Programs
 programs.values = mapped
@@ -1995,6 +2016,65 @@ programs.enabled = values.contains(n)
     }
 
     #[test]
+    fn lists_preserve_order_and_duplicates_while_sets_deduplicate() {
+        let source = r#"
+let values = [1, 1, 2]
+let mapped = values.map(inline |value| => value + 1)
+let filtered = values.filter(inline |value| => value == 1)
+let unique = @set [1, 1, 2]
+"#;
+        let arena = AstArena::new();
+        let ast = parse(source, &arena);
+        let resolution = collect_module(ast, ModuleId(0)).resolve(&ImportEnvironment::default());
+        assert!(resolution.errors().is_empty(), "{:#?}", resolution.errors());
+        let types = check_module(ast, &resolution, &TypeEnvironment::default());
+        assert!(types.errors().is_empty(), "{:#?}", types.errors());
+        let result = evaluate_module(ast, &resolution, &types, &EvaluationInputs::default());
+        assert!(result.is_success(), "{:#?}", result.errors());
+
+        let symbols = ast
+            .statements
+            .iter()
+            .map(|statement| {
+                let Statement::LetStatement(binding) = statement else {
+                    panic!("expected let binding");
+                };
+                symbol_of(&resolution, &binding.name)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            result.symbol_value(symbols[0]),
+            Some(&RuntimeValue::List(vec![
+                RuntimeValue::Int(1),
+                RuntimeValue::Int(1),
+                RuntimeValue::Int(2),
+            ]))
+        );
+        assert_eq!(
+            result.symbol_value(symbols[1]),
+            Some(&RuntimeValue::List(vec![
+                RuntimeValue::Int(2),
+                RuntimeValue::Int(2),
+                RuntimeValue::Int(3),
+            ]))
+        );
+        assert_eq!(
+            result.symbol_value(symbols[2]),
+            Some(&RuntimeValue::List(vec![
+                RuntimeValue::Int(1),
+                RuntimeValue::Int(1),
+            ]))
+        );
+        assert_eq!(
+            result.symbol_value(symbols[3]),
+            Some(&RuntimeValue::Set(vec![
+                RuntimeValue::Int(1),
+                RuntimeValue::Int(2),
+            ]))
+        );
+    }
+
+    #[test]
     fn evaluates_closures_and_distinguishes_exact_from_opaque_dependencies() {
         let source = r#"
 type Programs {
@@ -2002,7 +2082,7 @@ type Programs {
     opaque_values: Set<Int>
 }
 let tunable threshold = 1
-let values = [1, 2, 3]
+let values = @set [1, 2, 3]
 let inline_values = values.filter(inline |value| => value > threshold)
 let opaque_values = values.filter(opaque |value: Int| -> Bool => {
     return value > threshold

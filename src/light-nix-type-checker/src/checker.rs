@@ -9,10 +9,11 @@ use light_nix_name_resolver::{
 };
 use light_nix_parser::ast::{
     AST, AccessOperator, Array, AssignValue, BinaryOperator, ClosureBody, ClosureExpression,
-    ElseBranchValue, ExplicitTypeArgument, ExplicitTypeArguments, Expression, FunctionCall,
-    FunctionDefine, GenericParameters, ImplementsDefine, InterfaceDefine, LetStatement,
-    NestedAssignment, Pattern, Primary, PrimaryAccess, Source, Statement, Statements, TypeDefine,
-    TypeInfo, TypeOperator, TypedefBlock, TypedefValue, UnaryOperator, Value, WhereClause,
+    CollectionKind, ElseBranchValue, ExplicitTypeArgument, ExplicitTypeArguments, Expression,
+    FunctionCall, FunctionDefine, GenericParameters, ImplementsDefine, InterfaceDefine,
+    LetStatement, NestedAssignment, Pattern, Primary, PrimaryAccess, Source, Statement, Statements,
+    TypeDefine, TypeInfo, TypeOperator, TypedefBlock, TypedefValue, UnaryOperator, Value,
+    WhereClause,
 };
 
 use crate::{
@@ -1817,7 +1818,11 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
             };
             element = Some(element.map_or(found.clone(), |current| self.join_at(&current, &found)));
         }
-        Type::Set(Box::new(element.unwrap_or_else(|| self.unifier.fresh())))
+        let element = Box::new(element.unwrap_or_else(|| self.unifier.fresh()));
+        match array.kind {
+            CollectionKind::List => Type::List(element),
+            CollectionKind::Set => Type::Set(element),
+        }
     }
 
     fn infer_call(&mut self, callee: Type, call: &'ast FunctionCall<'input, 'allocator>) -> Type {
@@ -2715,7 +2720,7 @@ let invalid: Bool = 1
     }
 
     #[test]
-    fn arrays_default_to_sets_and_builtin_methods_are_polymorphic() {
+    fn arrays_default_to_lists_and_set_literals_are_explicit() {
         let source = r#"
 opaque function stringify(value: Int) -> String {
     return value.to_string()
@@ -2723,6 +2728,7 @@ opaque function stringify(value: Int) -> String {
 let values = [1, 2]
 let mapped = values.map(stringify)
 let contained = values.contains(1)
+let unique = @set [1, 1, 2]
 "#;
         check_source(source, |ast, resolution, result| {
             assert!(result.errors().is_empty(), "{:#?}", result.errors());
@@ -2740,14 +2746,14 @@ let contained = values.contains(1)
                     .symbol_type(symbol_of(resolution, &values.name))
                     .unwrap()
                     .ty,
-                Type::Set(Box::new(Type::Int))
+                Type::List(Box::new(Type::Int))
             );
             assert_eq!(
                 result
                     .symbol_type(symbol_of(resolution, &mapped.name))
                     .unwrap()
                     .ty,
-                Type::Set(Box::new(Type::String))
+                Type::List(Box::new(Type::String))
             );
             assert_eq!(
                 result
@@ -2762,6 +2768,16 @@ let contained = values.contains(1)
             assert_eq!(
                 result.member_resolution(&mapped_value.accesses[0]),
                 Some(&MemberResolution::Builtin(BuiltinMethod::Map))
+            );
+            let Statement::LetStatement(unique) = ast.statements[4] else {
+                panic!("expected explicit set binding");
+            };
+            assert_eq!(
+                result
+                    .symbol_type(symbol_of(resolution, &unique.name))
+                    .unwrap()
+                    .ty,
+                Type::Set(Box::new(Type::Int))
             );
         });
     }
@@ -2789,14 +2805,14 @@ let mapped = values.map(opaque |value: Int| -> String => {
                     .symbol_type(symbol_of(resolution, &filtered.name))
                     .unwrap()
                     .ty,
-                Type::Set(Box::new(Type::Int))
+                Type::List(Box::new(Type::Int))
             );
             assert_eq!(
                 result
                     .symbol_type(symbol_of(resolution, &mapped.name))
                     .unwrap()
                     .ty,
-                Type::Set(Box::new(Type::String))
+                Type::List(Box::new(Type::String))
             );
 
             let Expression::Primary(filtered_value) = filtered.value.unwrap() else {

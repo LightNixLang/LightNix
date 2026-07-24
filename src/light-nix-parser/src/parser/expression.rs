@@ -4,12 +4,12 @@ use bumpalo::Bump;
 use crate::{
     ast::{
         AST, AccessOperator, Array, BinaryExpression, BinaryOperator, ClosureBody,
-        ClosureExpression, ClosureParameter, ElseBranch, ElseBranchValue, ElvisExpression,
-        EnumVariantPattern, ExplicitTypeArgument, ExplicitTypeArguments, Expression,
-        FunctionAttribute, FunctionCall, IfBranch, IfExpression, Literal, LiteralValue, MatchArm,
-        MatchExpression, Pattern, Primary, PrimaryAccess, PrimaryAccessMember, ReturnExpression,
-        SomePattern, SomeValue, Spanned, StringLiteral, ThrowExpression, TypeOperationExpression,
-        TypeOperator, UnaryExpression, UnaryOperator, Value,
+        ClosureExpression, ClosureParameter, CollectionKind, ElseBranch, ElseBranchValue,
+        ElvisExpression, EnumVariantPattern, ExplicitTypeArgument, ExplicitTypeArguments,
+        Expression, FunctionAttribute, FunctionCall, IfBranch, IfExpression, Literal, LiteralValue,
+        MatchArm, MatchExpression, Pattern, Primary, PrimaryAccess, PrimaryAccessMember,
+        ReturnExpression, SomePattern, SomeValue, Spanned, StringLiteral, ThrowExpression,
+        TypeOperationExpression, TypeOperator, UnaryExpression, UnaryOperator, Value,
     },
     error::{Expected, ParseErrorKind, Scope, error_here, recover_until},
     lexer::{Lexer, TokenKind},
@@ -499,7 +499,9 @@ fn parse_value<'input, 'allocator>(
     let token = lexer.current()?;
 
     match token.kind {
-        TokenKind::BracketLeft => parse_array(lexer, errors, allocator).map(Value::Array),
+        TokenKind::BracketLeft | TokenKind::At => {
+            parse_array(lexer, errors, allocator).map(Value::Array)
+        }
         TokenKind::Some => parse_some_value(lexer, errors, allocator).map(Value::Some),
         TokenKind::Literal | TokenKind::This => {
             let anchor = lexer.cast_anchor();
@@ -603,11 +605,46 @@ fn parse_array<'input, 'allocator>(
     errors: &mut ParseErrors<'input, 'allocator>,
     allocator: &'allocator Bump,
 ) -> Option<&'allocator Array<'input, 'allocator>> {
-    if current_kind(lexer) != TokenKind::BracketLeft {
+    if !matches!(current_kind(lexer), TokenKind::BracketLeft | TokenKind::At) {
         return None;
     }
 
     let anchor = lexer.cast_anchor();
+    let kind = if current_kind(lexer) == TokenKind::At {
+        lexer.next();
+        let Some(modifier) = lexer.current() else {
+            errors.push(error_here(
+                ParseErrorKind::InvalidSetModifier,
+                lexer,
+                Expected::SetModifier,
+                Scope::Array,
+            ));
+            return None;
+        };
+        if modifier.kind != TokenKind::Literal || modifier.text != "set" {
+            errors.push(error_here(
+                ParseErrorKind::InvalidSetModifier,
+                lexer,
+                Expected::SetModifier,
+                Scope::Array,
+            ));
+            return None;
+        }
+        lexer.next();
+        CollectionKind::Set
+    } else {
+        CollectionKind::List
+    };
+
+    if current_kind(lexer) != TokenKind::BracketLeft {
+        errors.push(error_here(
+            ParseErrorKind::InvalidSetModifier,
+            lexer,
+            Expected::Token(TokenKind::BracketLeft),
+            Scope::Array,
+        ));
+        return None;
+    }
     lexer.next();
     skip_line_feed(lexer);
 
@@ -692,6 +729,7 @@ fn parse_array<'input, 'allocator>(
 
     let values = allocator.alloc_slice_fill_iter(values);
     Some(allocator.alloc(Array {
+        kind,
         values,
         span: anchor.elapsed(lexer),
     }))
