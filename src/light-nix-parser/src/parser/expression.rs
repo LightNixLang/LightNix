@@ -7,8 +7,9 @@ use crate::{
         ClosureExpression, ClosureParameter, ElseBranch, ElseBranchValue, ElvisExpression,
         EnumVariantPattern, ExplicitTypeArgument, ExplicitTypeArguments, Expression,
         FunctionAttribute, FunctionCall, IfBranch, IfExpression, Literal, LiteralValue, MatchArm,
-        MatchExpression, Pattern, Primary, PrimaryAccess, ReturnExpression, SomePattern, SomeValue,
-        Spanned, StringLiteral, ThrowExpression, UnaryExpression, UnaryOperator, Value,
+        MatchExpression, Pattern, Primary, PrimaryAccess, PrimaryAccessMember, ReturnExpression,
+        SomePattern, SomeValue, Spanned, StringLiteral, ThrowExpression, UnaryExpression,
+        UnaryOperator, Value,
     },
     error::{Expected, ParseErrorKind, Scope, error_here, recover_until},
     lexer::{Lexer, TokenKind},
@@ -305,6 +306,58 @@ fn parse_primary<'input, 'allocator>(
     let mut accesses = Vec::new_in(allocator);
 
     loop {
+        if current_kind(lexer) == TokenKind::BracketLeft {
+            let access_anchor = lexer.cast_anchor();
+            let operator_token = lexer.next().unwrap();
+            let operator = Spanned::new(AccessOperator::Index, operator_token.span);
+            skip_line_feed(lexer);
+
+            if current_kind(lexer) != TokenKind::StringLiteral {
+                let error = recover_until(
+                    ParseErrorKind::InvalidPrimaryAccess,
+                    lexer,
+                    &[
+                        TokenKind::BracketRight,
+                        TokenKind::LineFeed,
+                        TokenKind::None,
+                    ],
+                    Expected::StringLiteral,
+                    Scope::Primary,
+                    allocator,
+                );
+                errors.push(error);
+                if current_kind(lexer) == TokenKind::BracketRight {
+                    lexer.next();
+                }
+                break;
+            }
+
+            let key_token = lexer.next().unwrap();
+            let key = StringLiteral::new(key_token.text, key_token.span);
+            skip_line_feed(lexer);
+            if current_kind(lexer) != TokenKind::BracketRight {
+                let error = recover_until(
+                    ParseErrorKind::NonClosedBracket,
+                    lexer,
+                    &expression_end_tokens(),
+                    Expected::Token(TokenKind::BracketRight),
+                    Scope::Primary,
+                    allocator,
+                );
+                errors.push(error);
+                break;
+            }
+            lexer.next();
+            accesses.push(PrimaryAccess {
+                operator,
+                member: PrimaryAccessMember::Key(key),
+                type_arguments: None,
+                call: None,
+                span: access_anchor.elapsed(lexer),
+            });
+            continue;
+        }
+
         let operator = match current_kind(lexer) {
             TokenKind::Dot => AccessOperator::Dot,
             TokenKind::SafeDot => AccessOperator::SafeDot,
@@ -338,7 +391,7 @@ fn parse_primary<'input, 'allocator>(
 
         accesses.push(PrimaryAccess {
             operator,
-            member,
+            member: PrimaryAccessMember::Named(member),
             type_arguments,
             call,
             span: access_anchor.elapsed(lexer),

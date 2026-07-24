@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use light_nix_name_resolver::{FieldId, ModuleId, SymbolId, TypeDefId, VariantId};
 
@@ -11,6 +11,7 @@ pub enum RuntimeValue {
     Float(f64),
     String(String),
     Set(Vec<RuntimeValue>),
+    AttrSet(BTreeMap<String, RuntimeValue>),
     Optional(Option<Box<RuntimeValue>>),
     Record(RuntimeRecord),
     Enum(VariantId),
@@ -35,6 +36,7 @@ impl PartialEq for RuntimeValue {
                         .iter()
                         .all(|value| left.iter().any(|other| value == other))
             }
+            (Self::AttrSet(left), Self::AttrSet(right)) => left == right,
             (Self::Optional(left), Self::Optional(right)) => left == right,
             (Self::Record(left), Self::Record(right)) => left == right,
             (Self::Enum(left), Self::Enum(right)) => left == right,
@@ -57,6 +59,10 @@ impl RuntimeValue {
 
     pub fn optional(value: Option<Self>) -> Self {
         Self::Optional(value.map(Box::new))
+    }
+
+    pub fn attr_set() -> Self {
+        Self::AttrSet(BTreeMap::new())
     }
 
     pub fn with_field(mut self, field: FieldId, value: Self) -> Self {

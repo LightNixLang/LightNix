@@ -513,6 +513,11 @@ fn runtime_to_constant(value: &RuntimeValue) -> Option<Constant> {
             .map(runtime_to_constant)
             .collect::<Option<Vec<_>>>()
             .map(Constant::Set),
+        RuntimeValue::AttrSet(values) => values
+            .iter()
+            .map(|(key, value)| Some((key.clone(), runtime_to_constant(value)?)))
+            .collect::<Option<_>>()
+            .map(Constant::AttrSet),
         RuntimeValue::Optional(None) => Some(Constant::Optional(None)),
         RuntimeValue::Optional(Some(value)) => {
             runtime_to_constant(value).map(|value| Constant::Optional(Some(Box::new(value))))
@@ -539,6 +544,12 @@ fn constant_to_runtime(value: &Constant) -> Result<RuntimeValue, PlanError> {
                 .iter()
                 .map(constant_to_runtime)
                 .collect::<Result<Vec<_>, _>>()?,
+        ),
+        Constant::AttrSet(values) => RuntimeValue::AttrSet(
+            values
+                .iter()
+                .map(|(key, value)| Ok((key.clone(), constant_to_runtime(value)?)))
+                .collect::<Result<_, PlanError>>()?,
         ),
         Constant::Optional(value) => {
             RuntimeValue::optional(value.as_deref().map(constant_to_runtime).transpose()?)

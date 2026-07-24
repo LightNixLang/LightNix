@@ -343,6 +343,26 @@ impl ModelBuilder {
         )
     }
 
+    pub fn attr_set_key(
+        &mut self,
+        receiver: ExpressionId,
+        key: String,
+        result_type: Type,
+        origin: Option<SourceOrigin>,
+    ) -> Result<ExpressionId, BuildError> {
+        let Type::AttrSet(element) = self.expression_type(receiver)? else {
+            return Err(error(BuildErrorKind::InvalidOperation));
+        };
+        if element.as_ref() != &result_type {
+            return Err(error(BuildErrorKind::InvalidOperation));
+        }
+        self.push_expression(
+            result_type,
+            ExpressionKind::AttrSetKey { receiver, key },
+            origin,
+        )
+    }
+
     pub fn call(
         &mut self,
         target: CallTarget,
@@ -542,6 +562,9 @@ fn constant_matches(value: &Constant, ty: &Type) -> bool {
         (Constant::Set(values), Type::Set(element)) => {
             values.iter().all(|value| constant_matches(value, element))
         }
+        (Constant::AttrSet(values), Type::AttrSet(element)) => values
+            .values()
+            .all(|value| constant_matches(value, element)),
         (Constant::Optional(None), Type::Optional(_)) => true,
         (Constant::Optional(Some(value)), Type::Optional(inner)) => constant_matches(value, inner),
         (Constant::Enum(_), Type::Named(_, _)) => true,

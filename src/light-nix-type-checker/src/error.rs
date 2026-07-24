@@ -52,6 +52,9 @@ pub enum TypeCheckErrorKind {
     OptionalAccessRequiresSafeOperator {
         found: Type,
     },
+    InvalidAttrSetAccess {
+        found: Type,
+    },
     ExpectedNumeric {
         found: Type,
     },

@@ -257,7 +257,9 @@ impl<'ast, 'input, 'allocator, 'context> Builder<'ast, 'input, 'allocator, 'cont
             } else {
                 DependencyEdgeKind::Reference
             };
-            self.record_literal(&access.member, kind);
+            if let Some(member) = access.named_member() {
+                self.record_literal(member, kind);
+            }
             self.record_typed_member(access);
             if let Some(call) = access.call {
                 self.visit_call(call);
@@ -348,7 +350,7 @@ impl<'ast, 'input, 'allocator, 'context> Builder<'ast, 'input, 'allocator, 'cont
             source,
             DependencyNodeId::Symbol(target),
             kind,
-            access.member.span.clone(),
+            access.member_span(),
         );
     }
 

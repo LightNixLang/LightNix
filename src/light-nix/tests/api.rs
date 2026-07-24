@@ -1,7 +1,7 @@
 use light_nix::{
     AnalysisEnvironment, Goal, PlanOutcome, PlanningRequest, analyze_module,
     evaluator::{EvaluationInputs, RuntimeValue},
-    ir::{Constant, MutationPolicy, VariableSource},
+    ir::{Constant, MutationPolicy, OutputPathSegment, VariableSource},
     name_resolver::ModuleId,
     parser::ast::AstArena,
 };
@@ -329,4 +329,89 @@ programs.enabled = bypass or packages.filter(opaque |package: String| -> Bool =>
         VariableSource::Symbol(bypass)
     );
     assert_eq!(plan.solution().variables[0].after, Constant::Bool(true));
+}
+
+#[test]
+fn attr_set_keys_are_typed_tracked_and_solved_as_finite_output_paths() {
+    let source = r#"
+type FileSystemSettings {
+    device: String
+    neededForBoot: Bool
+}
+let tunable(cost = 4) rootDevice = "/dev/disk/by-label/old"
+declare let fileSystems: AttrSet<FileSystemSettings>
+fileSystems["/"] = {
+    device = rootDevice,
+    neededForBoot = true,
+}
+let observedDevice = fileSystems["/"].device
+"#;
+    let arena = AstArena::new();
+    let analysis = analyze_module(source, &arena, ModuleId(0), &AnalysisEnvironment::default());
+    assert!(
+        analysis.is_success(),
+        "parse={:?}\nname={:?}\ntype={:?}\ndependency={:?}\nlower={:?}",
+        analysis.parse_errors(),
+        analysis.name_errors(),
+        analysis.type_errors(),
+        analysis.dependency_errors(),
+        analysis.lower_errors(),
+    );
+
+    let device = analysis
+        .output_path(r#"fileSystems["/"].device"#)
+        .expect("root device output")
+        .clone();
+    assert_eq!(
+        analysis.output_path_segments(["fileSystems", "/", "device"]),
+        Some(&device)
+    );
+    assert!(matches!(
+        device.segments()[0],
+        OutputPathSegment::Key(ref key) if key == "/"
+    ));
+    let needed_for_boot = analysis
+        .output_path_segments(["fileSystems", "/", "neededForBoot"])
+        .expect("neededForBoot output")
+        .clone();
+    let observed = analysis
+        .resolution()
+        .symbols()
+        .iter()
+        .find(|symbol| analysis.resolution().name(symbol.name) == "observedDevice")
+        .map(|symbol| symbol.id)
+        .expect("observedDevice symbol");
+    let evaluated = light_nix::evaluator::evaluate_module(
+        analysis.source(),
+        analysis.resolution(),
+        analysis.types(),
+        &EvaluationInputs::default(),
+    );
+    assert_eq!(
+        evaluated.symbol_value(observed),
+        Some(&RuntimeValue::String("/dev/disk/by-label/old".to_owned()))
+    );
+
+    let mut request = PlanningRequest::new();
+    request.require_output(
+        device.clone(),
+        Constant::String("/dev/disk/by-label/nixos".to_owned()),
+    );
+    let PlanOutcome::Applicable(plan) = analysis
+        .plan(&EvaluationInputs::default(), &request)
+        .unwrap()
+    else {
+        panic!("expected an applicable plan");
+    };
+
+    assert_eq!(plan.solution().cost, 4);
+    assert_eq!(
+        plan.after().get(&device).map(|entry| &entry.value),
+        Some(&RuntimeValue::String("/dev/disk/by-label/nixos".to_owned()))
+    );
+    assert_eq!(
+        plan.after().get(&needed_for_boot).map(|entry| &entry.value),
+        Some(&RuntimeValue::Bool(true))
+    );
+    assert!(plan.side_effects().next().is_none());
 }

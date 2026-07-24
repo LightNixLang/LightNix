@@ -2481,7 +2481,7 @@ let mapped = values.map:<String>(convert:<String>)
         let Expression::Primary(mapped) = mapped.value.unwrap() else {
             panic!("expected method primary");
         };
-        assert_eq!(mapped.accesses[0].member.value, "map");
+        assert_eq!(mapped.accesses[0].named_member().unwrap().value, "map");
         assert_eq!(
             mapped.accesses[0].type_arguments.unwrap().arguments.len(),
             1
@@ -2667,7 +2667,10 @@ let selected: string = match parsed {
             from_repr.accesses[0].operator.value,
             AccessOperator::DoubleColon
         );
-        assert_eq!(from_repr.accesses[0].member.value, "from_repr");
+        assert_eq!(
+            from_repr.accesses[0].named_member().unwrap().value,
+            "from_repr"
+        );
 
         let Statement::LetStatement(name) = &ast.statements[1] else {
             panic!("expected name binding");
@@ -3484,5 +3487,66 @@ declare let test: Test<String, Int>
             panic!("expected Test value");
         };
         assert_eq!(value.type_info.unwrap().parameters.len(), 2);
+    }
+
+    #[test]
+    fn parses_attr_set_string_key_accesses() {
+        let source = r#"
+let device = fileSystems["/"].device
+users.users["alice"].isNormalUser = true
+"#;
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert!(errors.is_empty(), "parse errors: {errors:#?}");
+        let Statement::LetStatement(device) = ast.statements[0] else {
+            panic!("expected device binding");
+        };
+        let Expression::Primary(device) = device.value.unwrap() else {
+            panic!("expected primary expression");
+        };
+        assert_eq!(device.accesses.len(), 2);
+        assert_eq!(device.accesses[0].operator.value, AccessOperator::Index);
+        assert_eq!(device.accesses[0].key().unwrap().value, r#""/""#);
+        assert_eq!(device.accesses[1].named_member().unwrap().value, "device");
+
+        let Statement::AssignStatement(user) = ast.statements[1] else {
+            panic!("expected user assignment");
+        };
+        let Expression::Primary(user) = user.target else {
+            panic!("expected primary assignment target");
+        };
+        assert_eq!(user.accesses[0].named_member().unwrap().value, "users");
+        assert_eq!(user.accesses[1].key().unwrap().value, r#""alice""#);
+        assert_eq!(
+            user.accesses[2].named_member().unwrap().value,
+            "isNormalUser"
+        );
+    }
+
+    #[test]
+    fn invalid_attr_set_key_recovers_to_the_following_statement() {
+        let source = r#"
+let broken = fileSystems[123]
+let recovered = true
+"#;
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert!(errors.iter().any(|error| {
+            error.kind == ParseErrorKind::InvalidPrimaryAccess
+                && error.expected == crate::error::Expected::StringLiteral
+        }));
+        assert_eq!(ast.statements.len(), 2, "parse errors: {errors:#?}");
+        let Statement::LetStatement(recovered) = ast.statements[1] else {
+            panic!("expected recovered binding");
+        };
+        assert_eq!(recovered.name.value, "recovered");
     }
 }

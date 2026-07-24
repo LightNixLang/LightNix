@@ -170,7 +170,7 @@ impl<'ast> TypeCheckResult<'ast> {
         access: &'ast PrimaryAccess<'input, 'allocator>,
     ) -> Option<&MemberResolution> {
         self.member_resolutions
-            .get(&AstId::new(&access.member, AstKind::Literal))
+            .get(&AstId::new(access, AstKind::PrimaryAccess))
     }
 
     pub fn symbol_type(&self, symbol: SymbolId) -> Option<&TypeScheme> {
@@ -249,6 +249,7 @@ pub struct InterfaceMethodScheme {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemberResolution {
     Field(FieldId),
+    AttrSetKey,
     Builtin(BuiltinMethod),
     InterfaceMethod {
         interface: TypeDefId,
@@ -1383,12 +1384,55 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
         state: PrimaryState,
         access: &'ast light_nix_parser::ast::PrimaryAccess<'input, 'allocator>,
     ) -> PrimaryState {
+        if access.key().is_some() {
+            return match state {
+                PrimaryState::Value(receiver) => {
+                    let receiver = self.unifier.resolve(&receiver);
+                    if let Type::Optional(_) = receiver {
+                        self.error(
+                            TypeCheckErrorKind::OptionalAccessRequiresSafeOperator {
+                                found: receiver,
+                            },
+                            access.operator.span.clone(),
+                        );
+                        return PrimaryState::Error;
+                    }
+                    match receiver {
+                        Type::AttrSet(element) => {
+                            self.member_resolutions.insert(
+                                AstId::new(access, AstKind::PrimaryAccess),
+                                MemberResolution::AttrSetKey,
+                            );
+                            PrimaryState::Value(*element)
+                        }
+                        found => {
+                            self.error(
+                                TypeCheckErrorKind::InvalidAttrSetAccess { found },
+                                access.member_span(),
+                            );
+                            PrimaryState::Error
+                        }
+                    }
+                }
+                PrimaryState::Type(_) | PrimaryState::Module => {
+                    self.error(
+                        TypeCheckErrorKind::InvalidAttrSetAccess { found: Type::Error },
+                        access.member_span(),
+                    );
+                    PrimaryState::Error
+                }
+                PrimaryState::Error => PrimaryState::Error,
+            };
+        }
+        let member = access
+            .named_member()
+            .expect("non-index primary access must have a named member");
         match state {
             PrimaryState::Type(owner) => {
                 if access.operator.value != AccessOperator::DoubleColon {
                     return PrimaryState::Error;
                 }
-                match self.resolution.resolve_literal(&access.member) {
+                match self.resolution.resolve_literal(member) {
                     Some(Res::EnumVariant(variant)) => {
                         let valid =
                             self.resolution.variants().iter().any(|candidate| {
@@ -1400,9 +1444,9 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
                             self.error(
                                 TypeCheckErrorKind::InvalidStaticMember {
                                     owner,
-                                    member: access.member.value.to_owned(),
+                                    member: member.value.to_owned(),
                                 },
-                                access.member.span.clone(),
+                                member.span.clone(),
                             );
                             PrimaryState::Error
                         }
@@ -1411,7 +1455,7 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
                         let ty = self.instantiate_symbol(
                             symbol,
                             access.type_arguments,
-                            access.member.span.clone(),
+                            member.span.clone(),
                         );
                         PrimaryState::Value(match access.call {
                             Some(call) => self.infer_call(ty, call),
@@ -1422,21 +1466,18 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
                         self.error(
                             TypeCheckErrorKind::InvalidStaticMember {
                                 owner,
-                                member: access.member.value.to_owned(),
+                                member: member.value.to_owned(),
                             },
-                            access.member.span.clone(),
+                            member.span.clone(),
                         );
                         PrimaryState::Error
                     }
                 }
             }
-            PrimaryState::Module => match self.resolution.resolve_literal(&access.member) {
+            PrimaryState::Module => match self.resolution.resolve_literal(member) {
                 Some(Res::Symbol(symbol)) => {
-                    let ty = self.instantiate_symbol(
-                        symbol,
-                        access.type_arguments,
-                        access.member.span.clone(),
-                    );
+                    let ty =
+                        self.instantiate_symbol(symbol, access.type_arguments, member.span.clone());
                     PrimaryState::Value(match access.call {
                         Some(call) => self.infer_call(ty, call),
                         None => ty,
@@ -1476,12 +1517,14 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
         receiver: &Type,
         access: &'ast light_nix_parser::ast::PrimaryAccess<'input, 'allocator>,
     ) -> Type {
+        let member = access
+            .named_member()
+            .expect("member inference requires a named access");
         if access.call.is_none()
-            && let Some((field_id, field_type)) =
-                self.resolve_named_field(receiver, access.member.value)
+            && let Some((field_id, field_type)) = self.resolve_named_field(receiver, member.value)
         {
             self.member_resolutions.insert(
-                AstId::new(&access.member, AstKind::Literal),
+                AstId::new(access, AstKind::PrimaryAccess),
                 MemberResolution::Field(field_id),
             );
             return field_type;
@@ -1492,7 +1535,7 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
         let mut methods: Vec<_> = self
             .interface_methods
             .iter()
-            .filter(|method| method.name == access.member.value && method.receiver.is_some())
+            .filter(|method| method.name == member.value && method.receiver.is_some())
             .cloned()
             .collect();
         if methods.len() > 1 {
@@ -1503,14 +1546,14 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
             let (method_type, bounds, map) = self.instantiate_scheme_in_order(
                 &method.scheme,
                 access.type_arguments,
-                access.member.span.clone(),
+                member.span.clone(),
                 &method.explicit_parameters,
             );
             let instantiated_receiver = substitute(
                 method.receiver.as_ref().expect("instance method receiver"),
                 &map,
             );
-            self.unify_at(receiver, &instantiated_receiver, access.member.span.clone());
+            self.unify_at(receiver, &instantiated_receiver, member.span.clone());
             for mut bound in bounds {
                 if bound.subject == instantiated_receiver {
                     bound.subject = receiver.clone();
@@ -1519,13 +1562,13 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
                     bound,
                     assumptions: self.assumptions.clone(),
                     dispatch: None,
-                    span: access.member.span.clone(),
+                    span: member.span.clone(),
                 });
             }
             let interface = substitute(&method.interface, &map);
-            let member = AstId::new(&access.member, AstKind::Literal);
+            let member_id = AstId::new(access, AstKind::PrimaryAccess);
             self.member_resolutions.insert(
-                member,
+                member_id,
                 MemberResolution::InterfaceMethod {
                     interface: method.owner,
                     declaration: method.symbol,
@@ -1539,12 +1582,12 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
                 },
                 assumptions: self.assumptions.clone(),
                 dispatch: Some(DispatchOrigin {
-                    member,
+                    member: member_id,
                     interface: method.owner,
                     declaration: method.symbol,
                     method: method.name.clone(),
                 }),
-                span: access.member.span.clone(),
+                span: member.span.clone(),
             });
             return match access.call {
                 Some(call) => self.infer_call(method_type, call),
@@ -1555,18 +1598,18 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
             self.error(
                 TypeCheckErrorKind::AmbiguousMember {
                     receiver: receiver.clone(),
-                    member: access.member.value.to_owned(),
+                    member: member.value.to_owned(),
                 },
-                access.member.span.clone(),
+                member.span.clone(),
             );
             return Type::Error;
         }
         self.error(
             TypeCheckErrorKind::UnknownMember {
                 receiver: receiver.clone(),
-                member: access.member.value.to_owned(),
+                member: member.value.to_owned(),
             },
-            access.member.span.clone(),
+            member.span.clone(),
         );
         Type::Error
     }
@@ -1597,9 +1640,10 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
         receiver: &Type,
         access: &'ast PrimaryAccess<'input, 'allocator>,
     ) -> Option<Type> {
-        let method = find_builtin_method(receiver, access.member.value)?;
+        let member = access.named_member()?;
+        let method = find_builtin_method(receiver, member.value)?;
         self.member_resolutions.insert(
-            AstId::new(&access.member, AstKind::Literal),
+            AstId::new(access, AstKind::PrimaryAccess),
             MemberResolution::Builtin(method),
         );
         let function = match method {
@@ -2140,7 +2184,7 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
         type_info: &TypeInfo<'_, '_>,
     ) -> Type {
         let expected = match builtin {
-            BuiltinType::List | BuiltinType::Set => 1,
+            BuiltinType::List | BuiltinType::Set | BuiltinType::AttrSet => 1,
             _ => 0,
         };
         if parameters.len() != expected {
@@ -2160,6 +2204,7 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
             BuiltinType::String => Type::String,
             BuiltinType::List => Type::List(Box::new(parameters.remove(0))),
             BuiltinType::Set => Type::Set(Box::new(parameters.remove(0))),
+            BuiltinType::AttrSet => Type::AttrSet(Box::new(parameters.remove(0))),
         }
     }
 
@@ -2251,9 +2296,10 @@ fn named_type_id(ty: &Type) -> Option<TypeDefId> {
 fn contains_type_variable(ty: &Type) -> bool {
     match ty {
         Type::Variable(_) => true,
-        Type::Set(element) | Type::List(element) | Type::Optional(element) => {
-            contains_type_variable(element)
-        }
+        Type::Set(element)
+        | Type::List(element)
+        | Type::AttrSet(element)
+        | Type::Optional(element) => contains_type_variable(element),
         Type::Named(_, arguments) => arguments.iter().any(contains_type_variable),
         Type::Function(function) => {
             function.parameters.iter().any(contains_type_variable)
@@ -2266,9 +2312,10 @@ fn contains_type_variable(ty: &Type) -> bool {
 fn contains_unresolved_dispatch_type(ty: &Type) -> bool {
     match ty {
         Type::Parameter(_) | Type::Variable(_) => true,
-        Type::Set(element) | Type::List(element) | Type::Optional(element) => {
-            contains_unresolved_dispatch_type(element)
-        }
+        Type::Set(element)
+        | Type::List(element)
+        | Type::AttrSet(element)
+        | Type::Optional(element) => contains_unresolved_dispatch_type(element),
         Type::Named(_, arguments) => arguments.iter().any(contains_unresolved_dispatch_type),
         Type::Function(function) => {
             function
@@ -2291,9 +2338,10 @@ fn collection_element(ty: &Type) -> Option<Type> {
 fn contains_variable(ty: &Type) -> bool {
     match ty {
         Type::Variable(_) => true,
-        Type::Set(element) | Type::List(element) | Type::Optional(element) => {
-            contains_variable(element)
-        }
+        Type::Set(element)
+        | Type::List(element)
+        | Type::AttrSet(element)
+        | Type::Optional(element) => contains_variable(element),
         Type::Named(_, parameters) => parameters.iter().any(contains_variable),
         Type::Function(function) => {
             function.parameters.iter().any(contains_variable)
@@ -2353,6 +2401,7 @@ fn substitute(ty: &Type, substitutions: &HashMap<GenericParameterId, Type>) -> T
             .unwrap_or_else(|| ty.clone()),
         Type::Set(element) => Type::Set(Box::new(substitute(element, substitutions))),
         Type::List(element) => Type::List(Box::new(substitute(element, substitutions))),
+        Type::AttrSet(element) => Type::AttrSet(Box::new(substitute(element, substitutions))),
         Type::Optional(inner) => Type::optional(substitute(inner, substitutions)),
         Type::Named(id, parameters) => Type::Named(
             *id,
@@ -2382,7 +2431,10 @@ fn type_parameters(ty: &Type) -> Vec<GenericParameterId> {
 fn collect_type_parameters(ty: &Type, parameters: &mut Vec<GenericParameterId>) {
     match ty {
         Type::Parameter(parameter) => parameters.push(*parameter),
-        Type::Set(element) | Type::List(element) | Type::Optional(element) => {
+        Type::Set(element)
+        | Type::List(element)
+        | Type::AttrSet(element)
+        | Type::Optional(element) => {
             collect_type_parameters(element, parameters);
         }
         Type::Named(_, arguments) => {

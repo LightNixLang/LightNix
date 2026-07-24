@@ -123,8 +123,10 @@ mod grammar {
         mul_or_div_expr      ::= factor { ( "*" | "/" ) factor }
         factor               ::= ( "+" | "-" ) primary | primary
 
-        primary              ::= value { ( "." | "?." | "::" ) [ lf ] literal
-                                           [ type_arguments ] [ function_call ] }
+        primary              ::= value { named_access | attr_set_access }
+        named_access         ::= ( "." | "?." | "::" ) [ lf ] literal
+                                 [ type_arguments ] [ function_call ]
+        attr_set_access      ::= "[" [ lf ] string_literal [ lf ] "]"
         value                ::= array
                                  | literal [ type_arguments ] [ function_call ]
                                  | some_value

@@ -11,7 +11,9 @@ use light_nix_parser::{
     lexer::Lexer,
     parser::{ParseErrors, parse_source},
 };
-use light_nix_type_checker::{TypeCheckError, TypeCheckResult, TypeEnvironment, check_module};
+use light_nix_type_checker::{
+    Type, TypeCheckError, TypeCheckResult, TypeEnvironment, check_module,
+};
 
 /// External module declarations and types available while analysing a source.
 #[derive(Debug, Default)]
@@ -114,7 +116,8 @@ impl<'input, 'allocator> ModuleAnalysis<'input, 'allocator> {
     /// Resolves a catalog-style dotted output name such as
     /// `programs.firefox.enable` to the stable IDs used by the IR.
     pub fn output_path(&self, path: &str) -> Option<&OutputPath> {
-        self.output_path_segments(path.split('.'))
+        let segments = parse_output_path(path)?;
+        self.output_path_segments(segments.iter().map(String::as_str))
     }
 
     pub fn output_path_segments<'name>(
@@ -132,12 +135,20 @@ impl<'input, 'allocator> ModuleAnalysis<'input, 'allocator> {
         let mut receiver = self.types.symbol_type(root)?.ty.clone();
         let mut output = OutputPath::root(root);
         for segment in segments {
-            if segment.is_empty() {
-                return None;
+            match receiver {
+                Type::AttrSet(element) => {
+                    output = output.key(segment);
+                    receiver = *element;
+                }
+                _ => {
+                    if segment.is_empty() {
+                        return None;
+                    }
+                    let (field, field_type) = self.types.named_field(&receiver, segment)?;
+                    output = output.field(field);
+                    receiver = field_type;
+                }
             }
-            let (field, field_type) = self.types.named_field(&receiver, segment)?;
-            output = output.field(field);
-            receiver = field_type;
         }
         self.lowered
             .model()
@@ -164,6 +175,75 @@ impl<'input, 'allocator> ModuleAnalysis<'input, 'allocator> {
             && self.dependencies.cycles().is_empty()
             && self.lowered.errors().is_empty()
     }
+}
+
+fn parse_output_path(path: &str) -> Option<Vec<String>> {
+    let mut chars = path.chars().peekable();
+    let mut segments = Vec::new();
+    let mut root = String::new();
+    while let Some(character) = chars.peek().copied() {
+        if matches!(character, '.' | '[') {
+            break;
+        }
+        root.push(character);
+        chars.next();
+    }
+    if root.is_empty() {
+        return None;
+    }
+    segments.push(root);
+
+    while let Some(character) = chars.next() {
+        match character {
+            '.' => {
+                let mut field = String::new();
+                while let Some(character) = chars.peek().copied() {
+                    if matches!(character, '.' | '[') {
+                        break;
+                    }
+                    field.push(character);
+                    chars.next();
+                }
+                if field.is_empty() {
+                    return None;
+                }
+                segments.push(field);
+            }
+            '[' => {
+                let quote = chars.next().filter(|quote| matches!(quote, '\'' | '"'))?;
+                let mut key = String::new();
+                let mut escaped = false;
+                let mut closed = false;
+                for character in chars.by_ref() {
+                    if escaped {
+                        key.push(match character {
+                            'n' => '\n',
+                            'r' => '\r',
+                            't' => '\t',
+                            '\\' => '\\',
+                            '\'' => '\'',
+                            '"' => '"',
+                            other => other,
+                        });
+                        escaped = false;
+                    } else if character == '\\' {
+                        escaped = true;
+                    } else if character == quote {
+                        closed = true;
+                        break;
+                    } else {
+                        key.push(character);
+                    }
+                }
+                if !closed || escaped || chars.next() != Some(']') {
+                    return None;
+                }
+                segments.push(key);
+            }
+            _ => return None,
+        }
+    }
+    Some(segments)
 }
 
 fn import_source_literal(path: &str) -> String {

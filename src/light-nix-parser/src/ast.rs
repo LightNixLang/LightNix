@@ -633,7 +633,7 @@ impl_ast!(impl<'input, 'allocator> for Primary<'input, 'allocator>);
 #[derive(Debug)]
 pub struct PrimaryAccess<'input, 'allocator> {
     pub operator: Spanned<AccessOperator>,
-    pub member: Literal<'input>,
+    pub member: PrimaryAccessMember<'input>,
     pub type_arguments: Option<&'allocator ExplicitTypeArguments<'input, 'allocator>>,
     pub call: Option<&'allocator FunctionCall<'input, 'allocator>>,
     pub span: Range<usize>,
@@ -641,11 +641,41 @@ pub struct PrimaryAccess<'input, 'allocator> {
 
 impl_ast!(impl<'input, 'allocator> for PrimaryAccess<'input, 'allocator>);
 
+impl<'input> PrimaryAccess<'input, '_> {
+    pub fn named_member(&self) -> Option<&Literal<'input>> {
+        match &self.member {
+            PrimaryAccessMember::Named(member) => Some(member),
+            PrimaryAccessMember::Key(_) => None,
+        }
+    }
+
+    pub fn key(&self) -> Option<&StringLiteral<'input>> {
+        match &self.member {
+            PrimaryAccessMember::Named(_) => None,
+            PrimaryAccessMember::Key(key) => Some(key),
+        }
+    }
+
+    pub fn member_span(&self) -> Range<usize> {
+        match &self.member {
+            PrimaryAccessMember::Named(member) => member.span(),
+            PrimaryAccessMember::Key(key) => key.span(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum PrimaryAccessMember<'input> {
+    Named(Literal<'input>),
+    Key(StringLiteral<'input>),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AccessOperator {
     Dot,
     SafeDot,
     DoubleColon,
+    Index,
 }
 
 #[derive(Debug)]

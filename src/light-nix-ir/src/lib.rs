@@ -15,6 +15,6 @@ pub use model::{
     BinaryOperation, CallTarget, ClosureParameter, Constant, Constraint, ConstraintId,
     ConstraintKind, ConstraintModel, Expression, ExpressionId, ExpressionKind, FunctionMode,
     MutationPolicy, Objective, ObjectiveId, ObjectiveKind, OutputCase, OutputDefinition,
-    OutputPath, PathDeclaration, SourceOrigin, UnaryOperation, Variable, VariableId, VariableKind,
-    VariableSource, WeightedVariable,
+    OutputPath, OutputPathSegment, PathDeclaration, SourceOrigin, UnaryOperation, Variable,
+    VariableId, VariableKind, VariableSource, WeightedVariable,
 };

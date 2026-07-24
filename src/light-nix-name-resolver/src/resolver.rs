@@ -69,6 +69,7 @@ pub enum BuiltinType {
     String,
     List,
     Set,
+    AttrSet,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -475,6 +476,7 @@ impl<'ast, 'input, 'allocator> CollectedModule<'ast, 'input, 'allocator> {
             ("string", BuiltinType::String),
             ("List", BuiltinType::List),
             ("Set", BuiltinType::Set),
+            ("AttrSet", BuiltinType::AttrSet),
         ] {
             let name = self.names.intern(name);
             self.define(
@@ -1527,7 +1529,11 @@ impl<'ast, 'input, 'allocator> CollectedModule<'ast, 'input, 'allocator> {
         };
 
         for (index, access) in primary.accesses.iter().enumerate() {
-            let name = self.names.intern(access.member.value);
+            let Some(member) = access.named_member() else {
+                current = Res::Error;
+                continue;
+            };
+            let name = self.names.intern(member.value);
             let next_is_static = primary
                 .accesses
                 .get(index + 1)
@@ -1539,7 +1545,7 @@ impl<'ast, 'input, 'allocator> CollectedModule<'ast, 'input, 'allocator> {
                     next_is_static,
                     access.call.is_some(),
                     imports,
-                    access.member.span.clone(),
+                    member.span.clone(),
                 ),
                 Res::Type(owner) if access.operator.value == AccessOperator::DoubleColon => self
                     .find_variant(owner, name)
@@ -1548,7 +1554,7 @@ impl<'ast, 'input, 'allocator> CollectedModule<'ast, 'input, 'allocator> {
                 Res::Error => Res::Error,
                 _ => Res::Member(name),
             };
-            self.record_reference(&access.member, current);
+            self.record_reference(member, current);
             self.resolve_explicit_type_arguments(access.type_arguments, scope);
             if let Some(call) = access.call {
                 self.resolve_call(call, scope, imports);
@@ -1882,7 +1888,7 @@ let namespaced = module.helper
             Some(Res::Module(ModuleId(1)))
         );
         assert_eq!(
-            resolution.resolve_literal(&primary.accesses[0].member),
+            resolution.resolve_literal(primary.accesses[0].named_member().unwrap()),
             Some(Res::Symbol(helper))
         );
     }

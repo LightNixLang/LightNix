@@ -41,19 +41,30 @@ impl SourceOrigin {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct OutputPath {
     pub root: SymbolId,
-    pub fields: Vec<FieldId>,
+    pub segments: Vec<OutputPathSegment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum OutputPathSegment {
+    Field(FieldId),
+    Key(String),
 }
 
 impl OutputPath {
     pub fn root(root: SymbolId) -> Self {
         Self {
             root,
-            fields: Vec::new(),
+            segments: Vec::new(),
         }
     }
 
     pub fn field(mut self, field: FieldId) -> Self {
-        self.fields.push(field);
+        self.segments.push(OutputPathSegment::Field(field));
+        self
+    }
+
+    pub fn key(mut self, key: impl Into<String>) -> Self {
+        self.segments.push(OutputPathSegment::Key(key.into()));
         self
     }
 
@@ -61,8 +72,8 @@ impl OutputPath {
         self.root
     }
 
-    pub fn fields(&self) -> &[FieldId] {
-        &self.fields
+    pub fn segments(&self) -> &[OutputPathSegment] {
+        &self.segments
     }
 }
 
@@ -75,6 +86,7 @@ pub enum Constant {
     Float(f64),
     String(String),
     Set(Vec<Constant>),
+    AttrSet(BTreeMap<String, Constant>),
     Optional(Option<Box<Constant>>),
     Enum(VariantId),
 }
@@ -241,6 +253,10 @@ pub enum ExpressionKind {
         receiver: ExpressionId,
         field: FieldId,
         safe: bool,
+    },
+    AttrSetKey {
+        receiver: ExpressionId,
+        key: String,
     },
     Call {
         target: CallTarget,

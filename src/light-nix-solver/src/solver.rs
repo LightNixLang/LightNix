@@ -5,8 +5,8 @@ use std::{
 
 use light_nix_ir::{
     BinaryOperation, CallTarget, ClosureParameter, Constant, ConstraintModel, ExpressionId,
-    ExpressionKind, FunctionMode, MutationPolicy, ObjectiveKind, OutputPath, SourceOrigin,
-    UnaryOperation, VariableId, VariableKind,
+    ExpressionKind, FunctionMode, MutationPolicy, ObjectiveKind, OutputPath, OutputPathSegment,
+    SourceOrigin, UnaryOperation, VariableId, VariableKind,
 };
 use light_nix_name_resolver::{ModuleId, VariantId};
 use light_nix_type_checker::{BuiltinMethod, Type};
@@ -496,7 +496,9 @@ impl<'a> Encoder<'a> {
                 receiver,
                 arguments,
             } => self.encode_call(id, expression.ty(), *target, *receiver, arguments),
-            ExpressionKind::Function(_) | ExpressionKind::Field { .. } => {
+            ExpressionKind::Function(_)
+            | ExpressionKind::Field { .. }
+            | ExpressionKind::AttrSetKey { .. } => {
                 Err(error(SolveErrorKind::UnsupportedExpression(id)))
             }
             _ => Err(error(SolveErrorKind::UnsupportedExpression(id))),
@@ -1238,6 +1240,7 @@ impl<'a> Encoder<'a> {
             Type::Error
             | Type::Never
             | Type::List(_)
+            | Type::AttrSet(_)
             | Type::Function(_)
             | Type::Parameter(_)
             | Type::Variable(_) => Err(error(SolveErrorKind::UnsupportedType(ty.clone()))),
@@ -1269,6 +1272,7 @@ impl<'a> Encoder<'a> {
             Type::Error
             | Type::Never
             | Type::List(_)
+            | Type::AttrSet(_)
             | Type::Function(_)
             | Type::Parameter(_)
             | Type::Variable(_) => Err(error(SolveErrorKind::UnsupportedType(ty.clone()))),
@@ -1825,7 +1829,9 @@ fn register_set_types(ty: &Type, universes: &mut Vec<(Type, Vec<Constant>)>) {
             }
             register_set_types(element, universes);
         }
-        Type::Optional(inner) | Type::List(inner) => register_set_types(inner, universes),
+        Type::Optional(inner) | Type::List(inner) | Type::AttrSet(inner) => {
+            register_set_types(inner, universes)
+        }
         Type::Named(_, arguments) => {
             for argument in arguments {
                 register_set_types(argument, universes);
@@ -1953,17 +1959,27 @@ fn number_variant(value: u64) -> VariantId {
 }
 
 fn output_name(path: &OutputPath, suffix: &str) -> String {
-    let fields = path
-        .fields()
+    let segments = path
+        .segments()
         .iter()
-        .map(|field| format!("{}_{}", field.module.0, field.index))
+        .map(|segment| match segment {
+            OutputPathSegment::Field(field) => format!("f{}_{}", field.module.0, field.index),
+            OutputPathSegment::Key(key) => {
+                let encoded = key
+                    .as_bytes()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                format!("k{}_{}", key.len(), encoded)
+            }
+        })
         .collect::<Vec<_>>()
         .join("_");
     format!(
         "output_{}_{}_{}_{}",
         path.root_symbol().module.0,
         path.root_symbol().index,
-        fields,
+        segments,
         suffix
     )
 }

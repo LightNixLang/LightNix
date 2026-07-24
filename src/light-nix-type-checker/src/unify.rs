@@ -36,6 +36,7 @@ impl Unifier {
             }
             Type::Set(element) => Type::Set(Box::new(self.resolve(element))),
             Type::List(element) => Type::List(Box::new(self.resolve(element))),
+            Type::AttrSet(element) => Type::AttrSet(Box::new(self.resolve(element))),
             Type::Optional(inner) => Type::optional(self.resolve(inner)),
             Type::Named(id, parameters) => {
                 Type::Named(*id, parameters.iter().map(|ty| self.resolve(ty)).collect())
@@ -82,6 +83,9 @@ impl Unifier {
             }
             (Type::List(left), Type::List(right)) => {
                 Ok(Type::List(Box::new(self.unify(left, right)?)))
+            }
+            (Type::AttrSet(left), Type::AttrSet(right)) => {
+                Ok(Type::AttrSet(Box::new(self.unify(left, right)?)))
             }
             (Type::Optional(left), Type::Optional(right)) => {
                 Ok(Type::optional(self.unify(left, right)?))
@@ -151,9 +155,10 @@ impl Unifier {
     fn occurs(&mut self, needle: TypeVariableId, ty: &Type) -> bool {
         match self.resolve(ty) {
             Type::Variable(variable) => self.find(variable) == needle,
-            Type::Set(element) | Type::List(element) | Type::Optional(element) => {
-                self.occurs(needle, &element)
-            }
+            Type::Set(element)
+            | Type::List(element)
+            | Type::AttrSet(element)
+            | Type::Optional(element) => self.occurs(needle, &element),
             Type::Named(_, parameters) => parameters.iter().any(|ty| self.occurs(needle, ty)),
             Type::Function(function) => {
                 function.parameters.iter().any(|ty| self.occurs(needle, ty))

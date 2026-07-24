@@ -849,12 +849,24 @@ impl<'ast, 'input, 'allocator, 'context, 'inputs>
         receiver: TrackedValue,
         access: &'ast PrimaryAccess<'input, 'allocator>,
     ) -> Eval<TrackedValue> {
-        match self.resolution.resolve_literal(&access.member) {
+        if matches!(
+            self.types.member_resolution(access),
+            Some(MemberResolution::AttrSetKey)
+        ) {
+            return self.eval_attr_set_key(receiver, access);
+        }
+        let Some(member) = access.named_member() else {
+            return self.fail(
+                EvaluationErrorKind::InvalidBuiltinCall,
+                access.member_span(),
+            );
+        };
+        match self.resolution.resolve_literal(member) {
             Some(Res::EnumVariant(variant)) => return self.eval_variant(variant),
             Some(Res::Symbol(symbol)) => {
-                let mut value = self.eval_symbol(symbol, access.member.span.clone())?;
+                let mut value = self.eval_symbol(symbol, member.span.clone())?;
                 if let Some(call) = access.call {
-                    value = self.eval_call(value, None, call, access.member.span.clone())?;
+                    value = self.eval_call(value, None, call, member.span.clone())?;
                 }
                 return Ok(value);
             }
@@ -862,40 +874,87 @@ impl<'ast, 'input, 'allocator, 'context, 'inputs>
         }
         match self.types.member_resolution(access) {
             Some(MemberResolution::Field(field)) => self.eval_field(receiver, *field, access),
+            Some(MemberResolution::AttrSetKey) => unreachable!("handled before named access"),
             Some(MemberResolution::Builtin(method)) => {
                 let Some(call) = access.call else {
-                    return self.fail(
-                        EvaluationErrorKind::InvalidBuiltinCall,
-                        access.member.span.clone(),
-                    );
+                    return self.fail(EvaluationErrorKind::InvalidBuiltinCall, member.span.clone());
                 };
-                self.eval_builtin(receiver, *method, call, access.member.span.clone())
+                self.eval_builtin(receiver, *method, call, member.span.clone())
             }
             Some(MemberResolution::InterfaceMethod {
                 implementation: Some(method),
                 ..
             }) => {
                 let Some(call) = access.call else {
-                    return self.fail(
-                        EvaluationErrorKind::UnresolvedDispatch,
-                        access.member.span.clone(),
-                    );
+                    return self.fail(EvaluationErrorKind::UnresolvedDispatch, member.span.clone());
                 };
                 let function = TrackedValue::pure(RuntimeValue::Function(*method));
-                self.eval_call(function, Some(receiver), call, access.member.span.clone())
+                self.eval_call(function, Some(receiver), call, member.span.clone())
             }
             Some(MemberResolution::InterfaceMethod {
                 implementation: None,
                 ..
-            }) => self.fail(
-                EvaluationErrorKind::UnresolvedDispatch,
-                access.member.span.clone(),
-            ),
-            None => self.fail(
-                EvaluationErrorKind::InvalidBuiltinCall,
-                access.member.span.clone(),
-            ),
+            }) => self.fail(EvaluationErrorKind::UnresolvedDispatch, member.span.clone()),
+            None => self.fail(EvaluationErrorKind::InvalidBuiltinCall, member.span.clone()),
         }
+    }
+
+    fn eval_attr_set_key(
+        &mut self,
+        receiver: TrackedValue,
+        access: &'ast PrimaryAccess<'input, 'allocator>,
+    ) -> Eval<TrackedValue> {
+        let Some(key) = access.key() else {
+            return self.fail(
+                EvaluationErrorKind::InvalidBuiltinCall,
+                access.member_span(),
+            );
+        };
+        let key = decode_string(key.value).map_err(|kind| {
+            self.errors.push(EvaluationError {
+                kind,
+                module: self.module,
+                span: key.span.clone(),
+            });
+            Signal::Error
+        })?;
+        let path = receiver.path.clone().map(|path| path.key(key.clone()));
+        if let Some(entry) = path.as_ref().and_then(|path| self.snapshot.get(path)) {
+            let mut dependencies = receiver.dependencies;
+            dependencies.extend(entry.dependencies.iter().copied());
+            let mut opaque_dependencies = receiver.opaque_dependencies;
+            opaque_dependencies.extend(entry.opaque_dependencies.iter().copied());
+            return Ok(TrackedValue {
+                value: entry.value.clone(),
+                dependencies,
+                opaque_dependencies,
+                path,
+            });
+        }
+        let RuntimeValue::AttrSet(values) = receiver.value else {
+            return self.fail(
+                EvaluationErrorKind::ExpectedAttrSet {
+                    found: receiver.value,
+                },
+                access.member_span(),
+            );
+        };
+        let value = values
+            .get(&key)
+            .cloned()
+            .or_else(|| self.types.member_type(access).and_then(structural_default));
+        let Some(value) = value else {
+            return self.fail(
+                EvaluationErrorKind::MissingAttrSetKey { key },
+                access.member_span(),
+            );
+        };
+        Ok(TrackedValue {
+            value,
+            dependencies: receiver.dependencies,
+            opaque_dependencies: receiver.opaque_dependencies,
+            path,
+        })
     }
 
     fn eval_field(
@@ -922,19 +981,18 @@ impl<'ast, 'input, 'allocator, 'context, 'inputs>
                 EvaluationErrorKind::ExpectedRecord {
                     found: receiver.value,
                 },
-                access.member.span.clone(),
+                access.member_span(),
             );
         };
-        let value = record.fields.get(&field).cloned().or_else(|| {
-            self.types.field_type(field).and_then(|ty| match ty {
-                Type::Named(id, _) => Some(RuntimeValue::record(*id)),
-                _ => None,
-            })
-        });
+        let value = record
+            .fields
+            .get(&field)
+            .cloned()
+            .or_else(|| self.types.field_type(field).and_then(structural_default));
         let Some(value) = value else {
             return self.fail(
                 EvaluationErrorKind::MissingField { field },
-                access.member.span.clone(),
+                access.member_span(),
             );
         };
         Ok(TrackedValue {
@@ -1316,10 +1374,7 @@ impl<'ast, 'input, 'allocator, 'context, 'inputs>
                 .or_else(|| {
                     self.types
                         .symbol_type(symbol)
-                        .and_then(|scheme| match &scheme.ty {
-                            Type::Named(id, _) => Some(RuntimeValue::record(*id)),
-                            _ => None,
-                        })
+                        .and_then(|scheme| structural_default(&scheme.ty))
                 })
                 .map(TrackedValue::pure)
                 .ok_or_else(|| {
@@ -1412,10 +1467,16 @@ impl<'ast, 'input, 'allocator, 'context, 'inputs>
             if access.call.is_some() {
                 return None;
             }
-            let Some(MemberResolution::Field(field)) = self.types.member_resolution(access) else {
-                return None;
-            };
-            path.fields.push(*field);
+            match self.types.member_resolution(access) {
+                Some(MemberResolution::Field(field)) => {
+                    path = path.field(*field);
+                }
+                Some(MemberResolution::AttrSetKey) => {
+                    let key = access.key().and_then(|key| decode_string(key.value).ok())?;
+                    path = path.key(key);
+                }
+                _ => return None,
+            }
         }
         Some(path)
     }
@@ -1590,6 +1651,14 @@ fn decode_string(value: &str) -> Result<String, EvaluationErrorKind> {
         }
     }
     Err(EvaluationErrorKind::InvalidStringEscape)
+}
+
+fn structural_default(ty: &Type) -> Option<RuntimeValue> {
+    match ty {
+        Type::Named(id, _) => Some(RuntimeValue::record(*id)),
+        Type::AttrSet(_) => Some(RuntimeValue::attr_set()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

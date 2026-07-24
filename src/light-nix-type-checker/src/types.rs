@@ -16,6 +16,7 @@ pub enum Type {
     String,
     Set(Box<Type>),
     List(Box<Type>),
+    AttrSet(Box<Type>),
     Optional(Box<Type>),
     Named(TypeDefId, Vec<Type>),
     Function(FunctionType),
@@ -84,6 +85,7 @@ impl fmt::Display for Type {
             Self::String => formatter.write_str("String"),
             Self::Set(element) => write!(formatter, "Set<{element}>"),
             Self::List(element) => write!(formatter, "List<{element}>"),
+            Self::AttrSet(element) => write!(formatter, "AttrSet<{element}>"),
             Self::Optional(inner) => write!(formatter, "{inner}?"),
             Self::Named(id, parameters) => {
                 write!(formatter, "type#{}:{}", id.module.0, id.index)?;

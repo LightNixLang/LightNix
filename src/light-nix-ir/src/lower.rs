@@ -290,6 +290,9 @@ impl<'ast, 'input, 'allocator, 'context> Lowerer<'ast, 'input, 'allocator, 'cont
                 }
                 _ => None,
             };
+            if matches!(ty, Type::AttrSet(_)) {
+                continue;
+            }
             if let Some((child, child_arguments)) = child {
                 self.declare_record_fields(
                     path,
@@ -854,6 +857,48 @@ impl<'ast, 'input, 'allocator, 'context> Lowerer<'ast, 'input, 'allocator, 'cont
                         };
                     }
                 }
+                Some(MemberResolution::AttrSetKey) => {
+                    let Some(key) = access.key().and_then(|key| decode_string(key.value).ok())
+                    else {
+                        self.error(LowerErrorKind::InvalidString, access.member_span());
+                        current = LoweredValue {
+                            expression: self.unreachable(result_type, access.span.clone()),
+                            path: None,
+                        };
+                        continue;
+                    };
+                    if let Some(path) = current.path.take() {
+                        let path = path.key(key);
+                        let result = self.builder.output_reference(
+                            path.clone(),
+                            result_type.clone(),
+                            Some(self.origin(access.span.clone())),
+                        );
+                        current = LoweredValue {
+                            expression: self.finish_expression(
+                                result,
+                                result_type,
+                                access.span.clone(),
+                            ),
+                            path: Some(path),
+                        };
+                    } else {
+                        let result = self.builder.attr_set_key(
+                            current.expression,
+                            key,
+                            result_type.clone(),
+                            Some(self.origin(access.span.clone())),
+                        );
+                        current = LoweredValue {
+                            expression: self.finish_expression(
+                                result,
+                                result_type,
+                                access.span.clone(),
+                            ),
+                            path: None,
+                        };
+                    }
+                }
                 Some(MemberResolution::Builtin(method)) => {
                     let arguments = access.call.map_or_else(Vec::new, |call| {
                         call.arguments
@@ -908,8 +953,15 @@ impl<'ast, 'input, 'allocator, 'context> Lowerer<'ast, 'input, 'allocator, 'cont
                     };
                 }
                 _ => {
-                    if let Some(Res::EnumVariant(variant)) =
-                        self.resolution.resolve_literal(&access.member)
+                    let Some(member) = access.named_member() else {
+                        self.error(LowerErrorKind::MissingResolution, access.span.clone());
+                        current = LoweredValue {
+                            expression: self.unreachable(result_type, access.span.clone()),
+                            path: None,
+                        };
+                        continue;
+                    };
+                    if let Some(Res::EnumVariant(variant)) = self.resolution.resolve_literal(member)
                     {
                         let result = self.builder.constant(
                             result_type.clone(),
@@ -925,7 +977,7 @@ impl<'ast, 'input, 'allocator, 'context> Lowerer<'ast, 'input, 'allocator, 'cont
                             path: None,
                         };
                     } else if let Some(Res::Symbol(symbol)) =
-                        self.resolution.resolve_literal(&access.member)
+                        self.resolution.resolve_literal(member)
                     {
                         current = self.lower_symbol_call(
                             symbol,
@@ -1253,12 +1305,18 @@ impl<'ast, 'input, 'allocator, 'context> Lowerer<'ast, 'input, 'allocator, 'cont
             if access.call.is_some() {
                 return None;
             }
-            let Some(MemberResolution::Field(field)) = self.types.member_resolution(access) else {
-                return None;
-            };
-            path = path.field(*field);
-            if let Some(field_policy) = self.field_policies.get(field) {
-                policy = *field_policy;
+            match self.types.member_resolution(access) {
+                Some(MemberResolution::Field(field)) => {
+                    path = path.field(*field);
+                    if let Some(field_policy) = self.field_policies.get(field) {
+                        policy = *field_policy;
+                    }
+                }
+                Some(MemberResolution::AttrSetKey) => {
+                    let key = access.key().and_then(|key| decode_string(key.value).ok())?;
+                    path = path.key(key);
+                }
+                _ => return None,
             }
         }
         let ty = self.types.expression_type(expression)?.clone();
@@ -1418,6 +1476,7 @@ fn substitute_type(ty: &Type, substitutions: &HashMap<GenericParameterId, Type>)
     match ty {
         Type::Set(element) => Type::Set(Box::new(substitute_type(element, substitutions))),
         Type::List(element) => Type::List(Box::new(substitute_type(element, substitutions))),
+        Type::AttrSet(element) => Type::AttrSet(Box::new(substitute_type(element, substitutions))),
         Type::Optional(inner) => Type::optional(substitute_type(inner, substitutions)),
         Type::Named(id, arguments) => Type::Named(
             *id,
@@ -1570,7 +1629,10 @@ mod tests {
                 contains_variable(model, *optional, variable)
                     || contains_variable(model, *fallback, variable)
             }
-            ExpressionKind::Field { receiver, .. } => contains_variable(model, *receiver, variable),
+            ExpressionKind::Field { receiver, .. }
+            | ExpressionKind::AttrSetKey { receiver, .. } => {
+                contains_variable(model, *receiver, variable)
+            }
             ExpressionKind::Call {
                 receiver,
                 arguments,
