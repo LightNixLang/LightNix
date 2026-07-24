@@ -55,6 +55,18 @@ pub enum TypeCheckErrorKind {
     InvalidAttrSetAccess {
         found: Type,
     },
+    ExpectedUnion {
+        found: Type,
+    },
+    InvalidUnionAlternative {
+        union: Type,
+        target: Type,
+    },
+    InvalidUnionCastTarget {
+        found: Type,
+    },
+    UnionInterfaceBound,
+    UnionImplementationTarget,
     ExpectedNumeric {
         found: Type,
     },

@@ -12,7 +12,7 @@ use light_nix_parser::ast::{
     ElseBranchValue, ExplicitTypeArgument, ExplicitTypeArguments, Expression, FunctionCall,
     FunctionDefine, GenericParameters, ImplementsDefine, InterfaceDefine, LetStatement,
     NestedAssignment, Pattern, Primary, PrimaryAccess, Source, Statement, Statements, TypeDefine,
-    TypeInfo, TypedefBlock, TypedefValue, UnaryOperator, Value, WhereClause,
+    TypeInfo, TypeOperator, TypedefBlock, TypedefValue, UnaryOperator, Value, WhereClause,
 };
 
 use crate::{
@@ -633,6 +633,12 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
         self.assumptions.extend(bounds.clone());
         let interface = self.lower_type_info(node.interface);
         let target = self.lower_type_info(node.target);
+        if matches!(target, Type::Union(_)) {
+            self.error(
+                TypeCheckErrorKind::UnionImplementationTarget,
+                node.target.span(),
+            );
+        }
         let methods = node
             .methods
             .iter()
@@ -942,7 +948,7 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
         match value {
             AssignValue::Expression(expression) => {
                 let found = self.infer_expression(expression);
-                self.unify_at(expected, &found, expression.span());
+                self.assign_at(expected, &found, expression.span());
             }
             AssignValue::Nested(nested) => self.check_nested_assignment(expected, nested),
         }
@@ -983,7 +989,7 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
         for variant in node.variants {
             if let Some(value) = variant.value {
                 let found = self.infer_expression(value);
-                self.unify_at(&expected, &found, value.span());
+                self.assign_at(&expected, &found, value.span());
             }
         }
     }
@@ -999,7 +1005,7 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
             .unwrap_or(Type::Error);
         if let Some(value) = node.value {
             let found = self.infer_expression(value);
-            self.unify_at(&expected, &found, value.span());
+            self.assign_at(&expected, &found, value.span());
         } else if node.type_info.is_none() {
             self.error(TypeCheckErrorKind::MissingTypeAndValue, node.span.clone());
         }
@@ -1087,7 +1093,7 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
 
         self.predeclare_statements(&node.body.statements);
         let body_type = self.check_statements(&node.body.statements);
-        self.unify_at(&function_type.return_type, &body_type, node.body.span());
+        self.assign_at(&function_type.return_type, &body_type, node.body.span());
 
         self.assumptions = old_assumptions;
         self.current_return = old_return;
@@ -1103,7 +1109,7 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
                     .map(|value| self.infer_expression(value))
                     .unwrap_or(Type::Unit);
                 if let Some(expected) = self.current_return.clone() {
-                    self.unify_at(&expected, &found, node.span.clone());
+                    self.assign_at(&expected, &found, node.span.clone());
                 } else {
                     self.error(TypeCheckErrorKind::ReturnOutsideFunction, node.span.clone());
                 }
@@ -1128,6 +1134,38 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
                 );
                 self.unify_at(&inner, &fallback, node.fallback.span());
                 inner
+            }
+            Expression::TypeOperation(node) => {
+                let inferred_value = self.infer_expression(node.value);
+                let value = self.unifier.resolve(&inferred_value);
+                let lowered_target = self.lower_type_info(node.target);
+                let target = self.unifier.resolve(&lowered_target);
+                let invalid_target =
+                    matches!(target, Type::Union(_) | Type::Optional(_) | Type::Never);
+                if invalid_target {
+                    self.error(
+                        TypeCheckErrorKind::InvalidUnionCastTarget {
+                            found: target.clone(),
+                        },
+                        node.target.span(),
+                    );
+                } else if !value.contains_union_alternative(&target) {
+                    self.error(
+                        if matches!(value, Type::Union(_)) {
+                            TypeCheckErrorKind::InvalidUnionAlternative {
+                                union: value,
+                                target: target.clone(),
+                            }
+                        } else {
+                            TypeCheckErrorKind::ExpectedUnion { found: value }
+                        },
+                        node.value.span(),
+                    );
+                }
+                match node.operator.value {
+                    TypeOperator::Is => Type::Bool,
+                    TypeOperator::SafeCast => Type::optional(target),
+                }
             }
             Expression::Binary(node) => {
                 let left = self.infer_expression(node.left);
@@ -1211,7 +1249,7 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
                 self.check_statements(&block.statements)
             }
         };
-        self.unify_at(&return_type, &body_type, node.body.span());
+        self.assign_at(&return_type, &body_type, node.body.span());
         self.current_return = old_return;
         Type::function(parameters, return_type)
     }
@@ -1222,24 +1260,43 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
     ) -> Type {
         let condition = self.infer_expression(node.branch.condition);
         self.require_boolean(&condition, node.branch.condition.span());
+        let refinement = self.type_refinement(node.branch.condition);
         self.predeclare_statements(&node.branch.body.statements);
-        let mut result = self.check_statements(&node.branch.body.statements);
+        let mut result = self.check_statements_with_refinement(
+            &node.branch.body.statements,
+            refinement
+                .as_ref()
+                .map(|(symbol, positive, _)| (*symbol, positive.clone())),
+        );
+        let mut residual = refinement.map(|(symbol, _, negative)| (symbol, negative));
         let mut has_else = false;
         for branch in node.else_branches {
             let branch_type = match branch.value {
                 ElseBranchValue::If(if_branch) => {
+                    let saved = self.apply_refinement(residual.clone());
                     let condition = self.infer_expression(if_branch.condition);
                     self.require_boolean(&condition, if_branch.condition.span());
+                    let branch_refinement = self.type_refinement(if_branch.condition);
                     self.predeclare_statements(&if_branch.body.statements);
-                    self.check_statements(&if_branch.body.statements)
+                    let branch_type = self.check_statements_with_refinement(
+                        &if_branch.body.statements,
+                        branch_refinement
+                            .as_ref()
+                            .map(|(symbol, positive, _)| (*symbol, positive.clone())),
+                    );
+                    if let Some((symbol, _, negative)) = branch_refinement {
+                        residual = Some((symbol, negative));
+                    }
+                    self.restore_refinement(saved);
+                    branch_type
                 }
                 ElseBranchValue::Block(block) => {
                     has_else = true;
                     self.predeclare_statements(&block.statements);
-                    self.check_statements(&block.statements)
+                    self.check_statements_with_refinement(&block.statements, residual.clone())
                 }
             };
-            result = self.unify_at(&result, &branch_type, branch.span.clone());
+            result = self.join_at(&result, &branch_type);
         }
         if has_else {
             result
@@ -1254,13 +1311,83 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
         node: &'ast light_nix_parser::ast::MatchExpression<'input, 'allocator>,
     ) -> Type {
         let matched = self.infer_expression(node.value);
-        let result = self.unifier.fresh();
+        let mut result = None;
         for arm in node.arms {
             self.check_pattern(&arm.pattern, &matched);
             let arm_type = self.infer_expression(arm.value);
-            self.unify_at(&result, &arm_type, arm.value.span());
+            result = Some(result.map_or(arm_type.clone(), |current| {
+                self.join_at(&current, &arm_type)
+            }));
         }
+        result.unwrap_or(Type::Never)
+    }
+
+    fn type_refinement(
+        &mut self,
+        condition: &'ast Expression<'input, 'allocator>,
+    ) -> Option<(SymbolId, Type, Type)> {
+        let Expression::TypeOperation(operation) = condition else {
+            return None;
+        };
+        if operation.operator.value != TypeOperator::Is {
+            return None;
+        }
+        let Expression::Primary(primary) = operation.value else {
+            return None;
+        };
+        if !primary.accesses.is_empty() {
+            return None;
+        }
+        let Value::Literal(literal) = &primary.value else {
+            return None;
+        };
+        if literal.call.is_some() || literal.type_arguments.is_some() {
+            return None;
+        }
+        let Some(Res::Symbol(symbol)) = self.resolution.resolve_literal(&literal.literal) else {
+            return None;
+        };
+        let original = self
+            .symbol_types
+            .get(&symbol)
+            .map(|scheme| self.unifier.resolve(&scheme.ty))?;
+        let target = self
+            .type_info_types
+            .get(&AstId::new(operation.target, AstKind::TypeInfo))
+            .map(|ty| self.unifier.resolve(ty))?;
+        Some((
+            symbol,
+            target.clone(),
+            original.without_union_alternative(&target),
+        ))
+    }
+
+    fn check_statements_with_refinement(
+        &mut self,
+        statements: &'ast Statements<'input, 'allocator>,
+        refinement: Option<(SymbolId, Type)>,
+    ) -> Type {
+        let saved = self.apply_refinement(refinement);
+        let result = self.check_statements(statements);
+        self.restore_refinement(saved);
         result
+    }
+
+    fn apply_refinement(
+        &mut self,
+        refinement: Option<(SymbolId, Type)>,
+    ) -> Option<(SymbolId, TypeScheme)> {
+        let (symbol, ty) = refinement?;
+        let previous = self
+            .symbol_types
+            .insert(symbol, TypeScheme::monomorphic(ty))?;
+        Some((symbol, previous))
+    }
+
+    fn restore_refinement(&mut self, saved: Option<(SymbolId, TypeScheme)>) {
+        if let Some((symbol, scheme)) = saved {
+            self.symbol_types.insert(symbol, scheme);
+        }
     }
 
     fn check_pattern(&mut self, pattern: &'ast Pattern<'input, 'allocator>, expected: &Type) {
@@ -1682,15 +1809,15 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
     }
 
     fn infer_array(&mut self, array: &'ast Array<'input, 'allocator>) -> Type {
-        let element = self.unifier.fresh();
+        let mut element = None;
         for value in array.values {
             let found = match self.infer_primary_root(value) {
                 PrimaryState::Value(ty) => ty,
                 _ => Type::Error,
             };
-            self.unify_at(&element, &found, value.span());
+            element = Some(element.map_or(found.clone(), |current| self.join_at(&current, &found)));
         }
-        Type::Set(Box::new(element))
+        Type::Set(Box::new(element.unwrap_or_else(|| self.unifier.fresh())))
     }
 
     fn infer_call(&mut self, callee: Type, call: &'ast FunctionCall<'input, 'allocator>) -> Type {
@@ -1716,7 +1843,7 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
         }
         for (argument, expected) in call.arguments.iter().zip(&function.parameters) {
             let found = self.infer_expression(argument);
-            self.unify_at(expected, &found, argument.span());
+            self.assign_at(expected, &found, argument.span());
         }
         (*function.return_type).clone()
     }
@@ -1849,6 +1976,10 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
                     })
                     .unwrap_or(Type::Error);
                 for bound in parameter.bounds {
+                    if !bound.alternatives.is_empty() {
+                        self.error(TypeCheckErrorKind::UnionInterfaceBound, bound.span());
+                        continue;
+                    }
                     bounds.push(InterfaceBound {
                         subject: subject.clone(),
                         interface: self.lower_type_info_raw(bound),
@@ -1860,6 +1991,10 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
             for predicate in where_clause.predicates {
                 let subject = self.lower_type_info_raw(predicate.ty);
                 for bound in predicate.bounds {
+                    if !bound.alternatives.is_empty() {
+                        self.error(TypeCheckErrorKind::UnionInterfaceBound, bound.span());
+                        continue;
+                    }
                     bounds.push(InterfaceBound {
                         subject: subject.clone(),
                         interface: self.lower_type_info_raw(bound),
@@ -2150,6 +2285,14 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
         } else {
             ty
         };
+        let ty =
+            if type_info.alternatives.is_empty() {
+                ty
+            } else {
+                Type::union(std::iter::once(ty).chain(type_info.alternatives.iter().map(
+                    |alternative| self.lower_type_info_with_bounds(alternative, enforce_bounds),
+                )))
+            };
         self.type_info_types
             .insert(AstId::new(type_info, AstKind::TypeInfo), ty.clone());
         ty
@@ -2281,6 +2424,28 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
         }
     }
 
+    fn assign_at(&mut self, expected: &Type, found: &Type, span: Range<usize>) -> Type {
+        let expected = self.unifier.resolve(expected);
+        let found = self.unifier.resolve(found);
+        if expected.accepts(&found) {
+            expected
+        } else {
+            self.unify_at(&expected, &found, span)
+        }
+    }
+
+    fn join_at(&mut self, left: &Type, right: &Type) -> Type {
+        let left = self.unifier.resolve(left);
+        let right = self.unifier.resolve(right);
+        if left.accepts(&right) {
+            left
+        } else if right.accepts(&left) {
+            right
+        } else {
+            Type::union([left, right])
+        }
+    }
+
     fn error(&mut self, kind: TypeCheckErrorKind, span: Range<usize>) {
         self.errors.push(TypeCheckError { kind, span });
     }
@@ -2300,6 +2465,7 @@ fn contains_type_variable(ty: &Type) -> bool {
         | Type::List(element)
         | Type::AttrSet(element)
         | Type::Optional(element) => contains_type_variable(element),
+        Type::Union(alternatives) => alternatives.iter().any(contains_type_variable),
         Type::Named(_, arguments) => arguments.iter().any(contains_type_variable),
         Type::Function(function) => {
             function.parameters.iter().any(contains_type_variable)
@@ -2316,6 +2482,7 @@ fn contains_unresolved_dispatch_type(ty: &Type) -> bool {
         | Type::List(element)
         | Type::AttrSet(element)
         | Type::Optional(element) => contains_unresolved_dispatch_type(element),
+        Type::Union(alternatives) => alternatives.iter().any(contains_unresolved_dispatch_type),
         Type::Named(_, arguments) => arguments.iter().any(contains_unresolved_dispatch_type),
         Type::Function(function) => {
             function
@@ -2342,6 +2509,7 @@ fn contains_variable(ty: &Type) -> bool {
         | Type::List(element)
         | Type::AttrSet(element)
         | Type::Optional(element) => contains_variable(element),
+        Type::Union(alternatives) => alternatives.iter().any(contains_variable),
         Type::Named(_, parameters) => parameters.iter().any(contains_variable),
         Type::Function(function) => {
             function.parameters.iter().any(contains_variable)
@@ -2403,6 +2571,9 @@ fn substitute(ty: &Type, substitutions: &HashMap<GenericParameterId, Type>) -> T
         Type::List(element) => Type::List(Box::new(substitute(element, substitutions))),
         Type::AttrSet(element) => Type::AttrSet(Box::new(substitute(element, substitutions))),
         Type::Optional(inner) => Type::optional(substitute(inner, substitutions)),
+        Type::Union(alternatives) => {
+            Type::union(alternatives.iter().map(|ty| substitute(ty, substitutions)))
+        }
         Type::Named(id, parameters) => Type::Named(
             *id,
             parameters
@@ -2436,6 +2607,11 @@ fn collect_type_parameters(ty: &Type, parameters: &mut Vec<GenericParameterId>) 
         | Type::AttrSet(element)
         | Type::Optional(element) => {
             collect_type_parameters(element, parameters);
+        }
+        Type::Union(alternatives) => {
+            for alternative in alternatives {
+                collect_type_parameters(alternative, parameters);
+            }
         }
         Type::Named(_, arguments) => {
             for argument in arguments {
@@ -3074,14 +3250,14 @@ let invalid = match optional {
 }
 "#;
         check_source(source, |ast, resolution, result| {
-            assert_eq!(result.errors().len(), 2, "{:#?}", result.errors());
+            assert_eq!(result.errors().len(), 1, "{:#?}", result.errors());
             assert_eq!(
                 result
                     .errors()
                     .iter()
                     .filter(|error| matches!(error.kind, TypeCheckErrorKind::TypeMismatch { .. }))
                     .count(),
-                2
+                1
             );
             let Statement::LetStatement(unwrapped) = ast.statements[5] else {
                 panic!("expected unwrapped binding");
@@ -3092,6 +3268,16 @@ let invalid = match optional {
                     .unwrap()
                     .ty,
                 Type::Int
+            );
+            let Statement::LetStatement(union) = ast.statements[6] else {
+                panic!("expected union binding");
+            };
+            assert_eq!(
+                result
+                    .symbol_type(symbol_of(resolution, &union.name))
+                    .unwrap()
+                    .ty,
+                Type::union([Type::Int, Type::String])
             );
         });
     }
@@ -3230,5 +3416,82 @@ let boxed_value = boxed.value
                 .ty,
             Type::String
         );
+    }
+
+    #[test]
+    fn unions_support_type_refinement_safe_casts_and_elvis() {
+        let source = r#"
+inline function normalize(value: Int | String) -> Int {
+    if value is Int {
+        let number: Int = value
+        return value
+    } else {
+        let text: String = value
+        return 0
+    }
+}
+let tunable choice: Int | String = 1
+let casted = choice as? Int ?: 0
+let normalized = normalize(choice)
+"#;
+        check_source(source, |ast, resolution, result| {
+            assert!(result.errors().is_empty(), "{:#?}", result.errors());
+            let Statement::LetStatement(choice) = ast.statements[1] else {
+                panic!("expected choice binding");
+            };
+            let Statement::LetStatement(casted) = ast.statements[2] else {
+                panic!("expected cast binding");
+            };
+            let Statement::LetStatement(normalized) = ast.statements[3] else {
+                panic!("expected normalized binding");
+            };
+            assert_eq!(
+                result
+                    .symbol_type(symbol_of(resolution, &choice.name))
+                    .unwrap()
+                    .ty,
+                Type::union([Type::Int, Type::String])
+            );
+            assert_eq!(
+                result
+                    .symbol_type(symbol_of(resolution, &casted.name))
+                    .unwrap()
+                    .ty,
+                Type::Int
+            );
+            assert_eq!(
+                result
+                    .symbol_type(symbol_of(resolution, &normalized.name))
+                    .unwrap()
+                    .ty,
+                Type::Int
+            );
+        });
+    }
+
+    #[test]
+    fn union_interface_bounds_and_implementation_targets_are_rejected() {
+        let source = r#"
+interface First {}
+interface Second {}
+opaque function invalid<T: First | Second>(value: T) -> T {
+    return value
+}
+implements First for Int | String {}
+"#;
+        check_source(source, |_, _, result| {
+            assert!(
+                result
+                    .errors()
+                    .iter()
+                    .any(|error| error.kind == TypeCheckErrorKind::UnionInterfaceBound)
+            );
+            assert!(
+                result
+                    .errors()
+                    .iter()
+                    .any(|error| error.kind == TypeCheckErrorKind::UnionImplementationTarget)
+            );
+        });
     }
 }

@@ -42,6 +42,11 @@ enum EncodedValue {
         present: Bool,
         value: Box<EncodedValue>,
     },
+    Union {
+        alternatives: Vec<Type>,
+        selected: Int,
+        values: Vec<EncodedValue>,
+    },
     Closure {
         mode: FunctionMode,
         parameters: Vec<ClosureParameter>,
@@ -455,6 +460,22 @@ impl<'a> Encoder<'a> {
                 };
                 self.optimize.assert(present);
                 Ok(*value)
+            }
+            ExpressionKind::UnionInject { value, union } => {
+                let value = self.encode_expression(*value)?;
+                self.inject_union(value, union)
+            }
+            ExpressionKind::UnionProject { value, target } => {
+                let value = self.encode_expression(*value)?;
+                self.project_union(value, target)
+            }
+            ExpressionKind::TypeIs { value, target } => {
+                let value = self.encode_expression(*value)?;
+                self.encode_type_is(value, target).map(EncodedValue::Bool)
+            }
+            ExpressionKind::SafeCast { value, target } => {
+                let value = self.encode_expression(*value)?;
+                self.encode_safe_cast(value, target)
             }
             ExpressionKind::Unary { operation, operand } => {
                 let operand = self.encode_expression(*operand)?;
@@ -962,6 +983,10 @@ impl<'a> Encoder<'a> {
             }
             ExpressionKind::Some(value)
             | ExpressionKind::OptionalValue(value)
+            | ExpressionKind::UnionInject { value, .. }
+            | ExpressionKind::UnionProject { value, .. }
+            | ExpressionKind::TypeIs { value, .. }
+            | ExpressionKind::SafeCast { value, .. }
             | ExpressionKind::Unary { operand: value, .. } => {
                 self.collect_expression_variables(*value, dependencies, visiting);
             }
@@ -1140,6 +1165,102 @@ impl<'a> Encoder<'a> {
         }
     }
 
+    fn inject_union(&self, value: EncodedValue, union: &Type) -> Result<EncodedValue, SolveError> {
+        let Type::Union(alternatives) = union else {
+            return Err(error(SolveErrorKind::UnsupportedType(union.clone())));
+        };
+        let found = encoded_type(&value);
+        let Some(selected) = alternatives
+            .iter()
+            .position(|alternative| alternative.accepts(&found))
+        else {
+            return Err(self.type_error(union, found));
+        };
+        let mut value = Some(value);
+        let values = alternatives
+            .iter()
+            .enumerate()
+            .map(|(index, alternative)| {
+                if index == selected {
+                    Ok(value.take().expect("selected union value is consumed once"))
+                } else {
+                    self.default_value(alternative)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(EncodedValue::Union {
+            alternatives: alternatives.clone(),
+            selected: Int::from_u64(selected as u64),
+            values,
+        })
+    }
+
+    fn encode_type_is(&self, value: EncodedValue, target: &Type) -> Result<Bool, SolveError> {
+        match value {
+            EncodedValue::Union {
+                alternatives,
+                selected,
+                ..
+            } => {
+                let Some(index) = alternatives.iter().position(|ty| ty == target) else {
+                    return Err(self.type_error(&Type::union(alternatives), target.clone()));
+                };
+                Ok(selected.eq(Int::from_u64(index as u64)))
+            }
+            value if &encoded_type(&value) == target => Ok(Bool::from_bool(true)),
+            value => Err(self.type_error(target, encoded_type(&value))),
+        }
+    }
+
+    fn project_union(
+        &self,
+        value: EncodedValue,
+        target: &Type,
+    ) -> Result<EncodedValue, SolveError> {
+        let EncodedValue::Union {
+            alternatives,
+            values,
+            ..
+        } = value
+        else {
+            return Err(self.type_error(
+                &Type::union([target.clone(), Type::Error]),
+                encoded_type(&value),
+            ));
+        };
+        let Some(index) = alternatives.iter().position(|ty| ty == target) else {
+            return Err(self.type_error(&Type::union(alternatives), target.clone()));
+        };
+        Ok(values[index].clone())
+    }
+
+    fn encode_safe_cast(
+        &self,
+        value: EncodedValue,
+        target: &Type,
+    ) -> Result<EncodedValue, SolveError> {
+        match value {
+            EncodedValue::Union {
+                alternatives,
+                selected,
+                values,
+            } => {
+                let Some(index) = alternatives.iter().position(|ty| ty == target) else {
+                    return Err(self.type_error(&Type::union(alternatives), target.clone()));
+                };
+                Ok(EncodedValue::Optional {
+                    present: selected.eq(Int::from_u64(index as u64)),
+                    value: Box::new(values[index].clone()),
+                })
+            }
+            value if &encoded_type(&value) == target => Ok(EncodedValue::Optional {
+                present: Bool::from_bool(true),
+                value: Box::new(value),
+            }),
+            value => Err(self.type_error(target, encoded_type(&value))),
+        }
+    }
+
     fn encode_constant(&self, ty: &Type, value: &Constant) -> Result<EncodedValue, SolveError> {
         let encoded = match (ty, value) {
             (Type::Unit, Constant::Unit) => EncodedValue::Unit,
@@ -1192,6 +1313,32 @@ impl<'a> Encoder<'a> {
                     value: Box::new(value),
                 }
             }
+            (Type::Union(alternatives), value) => {
+                let Some(selected) = alternatives
+                    .iter()
+                    .position(|alternative| constant_matches(value, alternative))
+                else {
+                    return Err(error(SolveErrorKind::InvalidConstant {
+                        expected: ty.clone(),
+                    }));
+                };
+                let values = alternatives
+                    .iter()
+                    .enumerate()
+                    .map(|(index, alternative)| {
+                        if index == selected {
+                            self.encode_constant(alternative, value)
+                        } else {
+                            self.default_value(alternative)
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                EncodedValue::Union {
+                    alternatives: alternatives.clone(),
+                    selected: Int::from_u64(selected as u64),
+                    values,
+                }
+            }
             _ => {
                 return Err(error(SolveErrorKind::InvalidConstant {
                     expected: ty.clone(),
@@ -1237,6 +1384,26 @@ impl<'a> Encoder<'a> {
                 present: Bool::new_const(format!("{name}_present")),
                 value: Box::new(self.fresh_value(inner, &format!("{name}_value"))?),
             }),
+            Type::Union(alternatives) => {
+                let selected = Int::new_const(format!("{name}_type"));
+                self.optimize.assert(bool_or(
+                    (0..alternatives.len())
+                        .map(|index| selected.eq(Int::from_u64(index as u64)))
+                        .collect(),
+                ));
+                let values = alternatives
+                    .iter()
+                    .enumerate()
+                    .map(|(index, alternative)| {
+                        self.fresh_value(alternative, &format!("{name}_variant_{index}"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(EncodedValue::Union {
+                    alternatives: alternatives.clone(),
+                    selected,
+                    values,
+                })
+            }
             Type::Error
             | Type::Never
             | Type::List(_)
@@ -1268,6 +1435,14 @@ impl<'a> Encoder<'a> {
             Type::Optional(inner) => Ok(EncodedValue::Optional {
                 present: Bool::from_bool(false),
                 value: Box::new(self.default_value(inner)?),
+            }),
+            Type::Union(alternatives) => Ok(EncodedValue::Union {
+                alternatives: alternatives.clone(),
+                selected: Int::from_i64(0),
+                values: alternatives
+                    .iter()
+                    .map(|alternative| self.default_value(alternative))
+                    .collect::<Result<Vec<_>, _>>()?,
             }),
             Type::Error
             | Type::Never
@@ -1322,6 +1497,33 @@ impl<'a> Encoder<'a> {
                 let same_presence = left_present.eq(right_present);
                 let values = self.value_eq(left_value, right_value)?;
                 Bool::and(&[same_presence, Bool::or(&[left_present.not(), values])])
+            }
+            (
+                EncodedValue::Union {
+                    alternatives: left_alternatives,
+                    selected: left_selected,
+                    values: left_values,
+                },
+                EncodedValue::Union {
+                    alternatives: right_alternatives,
+                    selected: right_selected,
+                    values: right_values,
+                },
+            ) if left_alternatives == right_alternatives
+                && left_values.len() == right_values.len() =>
+            {
+                let same_tag = left_selected.eq(right_selected);
+                let same_values = left_values
+                    .iter()
+                    .zip(right_values)
+                    .enumerate()
+                    .map(|(index, (left, right))| {
+                        let selected = left_selected.eq(Int::from_u64(index as u64));
+                        self.value_eq(left, right)
+                            .map(|equal| selected.implies(&equal))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Bool::and(&[same_tag, bool_and(same_values)])
             }
             (left, right) => {
                 return Err(self.type_error(&encoded_type(left), encoded_type(right)));
@@ -1388,6 +1590,30 @@ impl<'a> Encoder<'a> {
                 present: condition.ite(left_present, right_present),
                 value: Box::new(self.value_ite(condition, left_value, right_value)?),
             },
+            (
+                EncodedValue::Union {
+                    alternatives: left_alternatives,
+                    selected: left_selected,
+                    values: left_values,
+                },
+                EncodedValue::Union {
+                    alternatives: right_alternatives,
+                    selected: right_selected,
+                    values: right_values,
+                },
+            ) if left_alternatives == right_alternatives
+                && left_values.len() == right_values.len() =>
+            {
+                EncodedValue::Union {
+                    alternatives: left_alternatives.clone(),
+                    selected: condition.ite(left_selected, right_selected),
+                    values: left_values
+                        .iter()
+                        .zip(right_values)
+                        .map(|(left, right)| self.value_ite(condition, left, right))
+                        .collect::<Result<Vec<_>, _>>()?,
+                }
+            }
             (left, right) => {
                 return Err(self.type_error(&encoded_type(left), encoded_type(right)));
             }
@@ -1629,6 +1855,17 @@ impl<'a> Encoder<'a> {
                 };
                 Ok(Constant::Optional(value))
             }
+            EncodedValue::Union {
+                selected, values, ..
+            } => {
+                let index = model
+                    .eval(selected, true)
+                    .and_then(|value| value.as_u64())
+                    .and_then(|value| usize::try_from(value).ok())
+                    .filter(|index| *index < values.len())
+                    .ok_or_else(|| error(SolveErrorKind::ModelValueUnavailable))?;
+                self.decode_value(model, &values[index])
+            }
             EncodedValue::Closure { .. } => Err(error(SolveErrorKind::ModelValueUnavailable)),
         }
     }
@@ -1817,6 +2054,13 @@ fn collect_enum_constant(ty: &Type, value: &Constant, universes: &mut Vec<(Type,
         (Type::Optional(inner), Constant::Optional(Some(value))) => {
             collect_enum_constant(inner, value, universes);
         }
+        (Type::Union(alternatives), value) => {
+            for alternative in alternatives {
+                if constant_matches(value, alternative) {
+                    collect_enum_constant(alternative, value, universes);
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -1831,6 +2075,11 @@ fn register_set_types(ty: &Type, universes: &mut Vec<(Type, Vec<Constant>)>) {
         }
         Type::Optional(inner) | Type::List(inner) | Type::AttrSet(inner) => {
             register_set_types(inner, universes)
+        }
+        Type::Union(alternatives) => {
+            for alternative in alternatives {
+                register_set_types(alternative, universes);
+            }
         }
         Type::Named(_, arguments) => {
             for argument in arguments {
@@ -1877,6 +2126,13 @@ fn collect_constant_universe(
         }
         (Type::Optional(inner), Constant::Optional(Some(value))) => {
             collect_constant_universe(inner, value, universes);
+        }
+        (Type::Union(alternatives), value) => {
+            for alternative in alternatives {
+                if constant_matches(value, alternative) {
+                    collect_constant_universe(alternative, value, universes);
+                }
+            }
         }
         _ => {}
     }
@@ -2055,6 +2311,9 @@ fn constant_matches(value: &Constant, ty: &Type) -> bool {
         }
         (Constant::Optional(None), Type::Optional(_)) => true,
         (Constant::Optional(Some(value)), Type::Optional(inner)) => constant_matches(value, inner),
+        (value, Type::Union(alternatives)) => alternatives
+            .iter()
+            .any(|alternative| constant_matches(value, alternative)),
         _ => false,
     }
 }
@@ -2069,6 +2328,7 @@ fn encoded_type(value: &EncodedValue) -> Type {
         EncodedValue::Enum(_) => Type::Error,
         EncodedValue::Set { element_type, .. } => Type::Set(Box::new(element_type.clone())),
         EncodedValue::Optional { value, .. } => Type::optional(encoded_type(value)),
+        EncodedValue::Union { alternatives, .. } => Type::union(alternatives.clone()),
         EncodedValue::Closure { ty, .. } => ty.clone(),
     }
 }

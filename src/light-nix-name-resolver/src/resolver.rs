@@ -1350,6 +1350,9 @@ impl<'ast, 'input, 'allocator> CollectedModule<'ast, 'input, 'allocator> {
         for parameter in type_info.parameters {
             self.resolve_type_info(parameter, scope);
         }
+        for alternative in type_info.alternatives {
+            self.resolve_type_info(alternative, scope);
+        }
     }
 
     fn resolve_expression(
@@ -1394,6 +1397,10 @@ impl<'ast, 'input, 'allocator> CollectedModule<'ast, 'input, 'allocator> {
             Expression::Elvis(node) => {
                 self.resolve_expression(node.optional, scope, imports);
                 self.resolve_expression(node.fallback, scope, imports);
+            }
+            Expression::TypeOperation(node) => {
+                self.resolve_expression(node.value, scope, imports);
+                self.resolve_type_info(node.target, scope);
             }
             Expression::Binary(node) => {
                 self.resolve_expression(node.left, scope, imports);

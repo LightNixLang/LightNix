@@ -5,7 +5,7 @@ use light_nix_name_resolver::{GenericParameterId, TypeDefId};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TypeVariableId(pub u32);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Type {
     Error,
     Never,
@@ -18,6 +18,7 @@ pub enum Type {
     List(Box<Type>),
     AttrSet(Box<Type>),
     Optional(Box<Type>),
+    Union(Vec<Type>),
     Named(TypeDefId, Vec<Type>),
     Function(FunctionType),
     Parameter(GenericParameterId),
@@ -42,9 +43,67 @@ impl Type {
     pub fn is_error(&self) -> bool {
         matches!(self, Self::Error)
     }
+
+    pub fn union(types: impl IntoIterator<Item = Type>) -> Self {
+        let mut alternatives = Vec::new();
+        for ty in types {
+            match ty {
+                Self::Union(nested) => {
+                    for ty in nested {
+                        if !alternatives.contains(&ty) {
+                            alternatives.push(ty);
+                        }
+                    }
+                }
+                ty if !alternatives.contains(&ty) => alternatives.push(ty),
+                _ => {}
+            }
+        }
+        alternatives.sort();
+        match alternatives.len() {
+            0 => Self::Never,
+            1 => alternatives.pop().unwrap(),
+            _ => Self::Union(alternatives),
+        }
+    }
+
+    /// Whether a value of `found` can be used where `self` is expected.
+    pub fn accepts(&self, found: &Type) -> bool {
+        if self == found || matches!(found, Self::Never) || self.is_error() || found.is_error() {
+            return true;
+        }
+        if let Self::Union(found_alternatives) = found {
+            return found_alternatives
+                .iter()
+                .all(|alternative| self.accepts(alternative));
+        }
+        match self {
+            Self::Union(alternatives) => alternatives
+                .iter()
+                .any(|alternative| alternative.accepts(found)),
+            _ => false,
+        }
+    }
+
+    pub fn contains_union_alternative(&self, target: &Type) -> bool {
+        match self {
+            Self::Union(alternatives) => alternatives.iter().any(|ty| ty == target),
+            ty => ty == target,
+        }
+    }
+
+    pub fn without_union_alternative(&self, target: &Type) -> Self {
+        match self {
+            Self::Union(alternatives) => {
+                Self::union(alternatives.iter().filter(|ty| *ty != target).cloned())
+            }
+            ty if ty == target => Self::Never,
+            ty => ty.clone(),
+        }
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FunctionType {
     pub parameters: Vec<Type>,
     pub return_type: Box<Type>,
@@ -86,7 +145,22 @@ impl fmt::Display for Type {
             Self::Set(element) => write!(formatter, "Set<{element}>"),
             Self::List(element) => write!(formatter, "List<{element}>"),
             Self::AttrSet(element) => write!(formatter, "AttrSet<{element}>"),
-            Self::Optional(inner) => write!(formatter, "{inner}?"),
+            Self::Optional(inner) => {
+                if matches!(inner.as_ref(), Self::Union(_)) {
+                    write!(formatter, "({inner})?")
+                } else {
+                    write!(formatter, "{inner}?")
+                }
+            }
+            Self::Union(alternatives) => {
+                for (index, alternative) in alternatives.iter().enumerate() {
+                    if index != 0 {
+                        formatter.write_str(" | ")?;
+                    }
+                    write!(formatter, "{alternative}")?;
+                }
+                Ok(())
+            }
             Self::Named(id, parameters) => {
                 write!(formatter, "type#{}:{}", id.module.0, id.index)?;
                 format_parameters(formatter, parameters)
@@ -119,4 +193,19 @@ fn format_parameters(formatter: &mut fmt::Formatter<'_>, parameters: &[Type]) ->
         write!(formatter, "{parameter}")?;
     }
     formatter.write_str(">")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unions_are_flattened_deduplicated_and_order_independent() {
+        let left = Type::union([Type::String, Type::union([Type::Int, Type::String])]);
+        let right = Type::union([Type::Int, Type::String]);
+
+        assert_eq!(left, right);
+        assert!(Type::union([Type::Bool, Type::Int, Type::String]).accepts(&right));
+        assert_eq!(right.without_union_alternative(&Type::Int), Type::String);
+    }
 }

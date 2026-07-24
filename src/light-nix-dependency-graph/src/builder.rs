@@ -225,6 +225,7 @@ impl<'ast, 'input, 'allocator, 'context> Builder<'ast, 'input, 'allocator, 'cont
                 self.visit_expression(node.optional);
                 self.visit_expression(node.fallback);
             }
+            Expression::TypeOperation(node) => self.visit_expression(node.value),
             Expression::Binary(node) => {
                 self.visit_expression(node.left);
                 self.visit_expression(node.right);

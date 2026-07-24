@@ -210,6 +210,70 @@ impl ModelBuilder {
         self.push_expression(result_type, ExpressionKind::OptionalValue(optional), origin)
     }
 
+    pub fn union_inject(
+        &mut self,
+        value: ExpressionId,
+        union: Type,
+        origin: Option<SourceOrigin>,
+    ) -> Result<ExpressionId, BuildError> {
+        let found = self.expression_type(value)?;
+        if !matches!(union, Type::Union(_)) || !union.accepts(found) {
+            return Err(error(BuildErrorKind::InvalidOperation));
+        }
+        self.push_expression(
+            union.clone(),
+            ExpressionKind::UnionInject { value, union },
+            origin,
+        )
+    }
+
+    pub fn type_is(
+        &mut self,
+        value: ExpressionId,
+        target: Type,
+        origin: Option<SourceOrigin>,
+    ) -> Result<ExpressionId, BuildError> {
+        let source = self.expression_type(value)?;
+        if !source.contains_union_alternative(&target) {
+            return Err(error(BuildErrorKind::InvalidOperation));
+        }
+        self.push_expression(Type::Bool, ExpressionKind::TypeIs { value, target }, origin)
+    }
+
+    pub fn union_project(
+        &mut self,
+        value: ExpressionId,
+        target: Type,
+        origin: Option<SourceOrigin>,
+    ) -> Result<ExpressionId, BuildError> {
+        let source = self.expression_type(value)?;
+        if !matches!(source, Type::Union(_)) || !source.contains_union_alternative(&target) {
+            return Err(error(BuildErrorKind::InvalidOperation));
+        }
+        self.push_expression(
+            target.clone(),
+            ExpressionKind::UnionProject { value, target },
+            origin,
+        )
+    }
+
+    pub fn safe_cast(
+        &mut self,
+        value: ExpressionId,
+        target: Type,
+        origin: Option<SourceOrigin>,
+    ) -> Result<ExpressionId, BuildError> {
+        let source = self.expression_type(value)?;
+        if !source.contains_union_alternative(&target) {
+            return Err(error(BuildErrorKind::InvalidOperation));
+        }
+        self.push_expression(
+            Type::optional(target.clone()),
+            ExpressionKind::SafeCast { value, target },
+            origin,
+        )
+    }
+
     pub fn unary(
         &mut self,
         operation: UnaryOperation,
@@ -520,7 +584,7 @@ impl ModelBuilder {
 
     fn require_type(&self, expression: ExpressionId, expected: &Type) -> Result<(), BuildError> {
         let found = self.expression_type(expression)?;
-        if found != expected {
+        if !expected.accepts(found) {
             return Err(error(BuildErrorKind::TypeMismatch {
                 expected: expected.clone(),
                 found: found.clone(),
@@ -568,6 +632,9 @@ fn constant_matches(value: &Constant, ty: &Type) -> bool {
         (Constant::Optional(None), Type::Optional(_)) => true,
         (Constant::Optional(Some(value)), Type::Optional(inner)) => constant_matches(value, inner),
         (Constant::Enum(_), Type::Named(_, _)) => true,
+        (value, Type::Union(alternatives)) => alternatives
+            .iter()
+            .any(|alternative| constant_matches(value, alternative)),
         _ => false,
     }
 }

@@ -7,7 +7,7 @@ use light_nix_parser::ast::{
     AST, AccessOperator, Array, AssignValue, BinaryOperator, Block, ClosureBody, ClosureExpression,
     ElseBranchValue, Expression, FunctionAttribute, FunctionCall, FunctionDefine, LetStatement,
     Literal, MatchArm, MutationPolicyKind, Pattern, Primary, PrimaryAccess, Source, Statement,
-    Statements, UnaryOperator, Value,
+    Statements, TypeOperator, UnaryOperator, Value,
 };
 use light_nix_type_checker::{BuiltinMethod, MemberResolution, Type, TypeCheckResult};
 
@@ -533,6 +533,27 @@ impl<'ast, 'input, 'allocator, 'context, 'inputs>
                     ),
                 }
             }
+            Expression::TypeOperation(node) => {
+                let value = self.eval_expression(node.value)?;
+                let target = self
+                    .types
+                    .type_info_type(node.target)
+                    .cloned()
+                    .unwrap_or(Type::Error);
+                let matches = self.runtime_matches_type(&value.value, &target);
+                let result = match node.operator.value {
+                    TypeOperator::Is => RuntimeValue::Bool(matches),
+                    TypeOperator::SafeCast => {
+                        RuntimeValue::optional(matches.then(|| value.value.clone()))
+                    }
+                };
+                Ok(TrackedValue {
+                    value: result,
+                    dependencies: value.dependencies,
+                    opaque_dependencies: value.opaque_dependencies,
+                    path: value.path,
+                })
+            }
             Expression::Binary(node) => self.eval_binary(node),
             Expression::Unary(node) => {
                 let operand = self.eval_expression(node.operand)?;
@@ -581,6 +602,40 @@ impl<'ast, 'input, 'allocator, 'context, 'inputs>
             captures,
         });
         Ok(TrackedValue::pure(RuntimeValue::Closure(id)))
+    }
+
+    fn runtime_matches_type(&self, value: &RuntimeValue, ty: &Type) -> bool {
+        match (value, ty) {
+            (RuntimeValue::Error, Type::Error) => true,
+            (RuntimeValue::Unit, Type::Unit) => true,
+            (RuntimeValue::Bool(_), Type::Bool) => true,
+            (RuntimeValue::Int(_), Type::Int) => true,
+            (RuntimeValue::Float(_), Type::Float) => true,
+            (RuntimeValue::String(_), Type::String) => true,
+            (RuntimeValue::Set(values), Type::Set(element)) => values
+                .iter()
+                .all(|value| self.runtime_matches_type(value, element)),
+            (RuntimeValue::AttrSet(values), Type::AttrSet(element)) => values
+                .values()
+                .all(|value| self.runtime_matches_type(value, element)),
+            (RuntimeValue::Optional(None), Type::Optional(_)) => true,
+            (RuntimeValue::Optional(Some(value)), Type::Optional(inner)) => {
+                self.runtime_matches_type(value, inner)
+            }
+            (RuntimeValue::Record(record), Type::Named(expected, _)) => record.ty == *expected,
+            (RuntimeValue::Enum(variant), Type::Named(expected, _)) => self
+                .resolution
+                .variants()
+                .iter()
+                .any(|candidate| candidate.id == *variant && candidate.owner == *expected),
+            (RuntimeValue::Function(_), Type::Function(_))
+            | (RuntimeValue::Closure(_), Type::Function(_)) => true,
+            (_, Type::Union(alternatives)) => alternatives
+                .iter()
+                .any(|ty| self.runtime_matches_type(value, ty)),
+            (_, Type::Never) => false,
+            _ => false,
+        }
     }
 
     fn eval_controlled_block(

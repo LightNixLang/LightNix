@@ -1879,6 +1879,77 @@ pub(super) fn parse_type_info<'input, 'allocator>(
     errors: &mut ParseErrors<'input, 'allocator>,
     allocator: &'allocator Bump,
 ) -> Option<&'allocator TypeInfo<'input, 'allocator>> {
+    let first = parse_type_atom(lexer, errors, allocator)?;
+    if current_kind(lexer) != TokenKind::VerticalLine {
+        return Some(first);
+    }
+
+    let mut alternatives = Vec::new_in(allocator);
+    while current_kind(lexer) == TokenKind::VerticalLine {
+        let separator = lexer.cast_anchor();
+        lexer.next();
+        skip_line_feed(lexer);
+        let Some(alternative) = parse_type_atom(lexer, errors, allocator) else {
+            // `|` is also the closing delimiter of a closure parameter list.
+            lexer.back_to_anchor(separator);
+            break;
+        };
+        alternatives.push(alternative);
+    }
+
+    let alternatives = allocator.alloc_slice_fill_iter(alternatives);
+    Some(
+        allocator.alloc(TypeInfo {
+            name: first.name.clone(),
+            parameters: first.parameters,
+            optional: first.optional,
+            alternatives,
+            span: first.span.start
+                ..alternatives
+                    .last()
+                    .map_or(first.span.end, |alternative| alternative.span.end),
+        }),
+    )
+}
+
+pub(super) fn parse_type_atom<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut ParseErrors<'input, 'allocator>,
+    allocator: &'allocator Bump,
+) -> Option<&'allocator TypeInfo<'input, 'allocator>> {
+    if current_kind(lexer) == TokenKind::ParenthesisLeft {
+        let anchor = lexer.cast_anchor();
+        lexer.next();
+        skip_line_feed(lexer);
+        let inner = parse_type_info(lexer, errors, allocator)?;
+        skip_line_feed(lexer);
+        if current_kind(lexer) != TokenKind::ParenthesisRight {
+            errors.push(error_here(
+                ParseErrorKind::NonClosedParenthesis,
+                lexer,
+                Expected::Token(TokenKind::ParenthesisRight),
+                Scope::TypeInfo,
+            ));
+            return Some(inner);
+        }
+        lexer.next();
+        return Some(allocator.alloc(TypeInfo {
+            name: inner.name.clone(),
+            parameters: inner.parameters,
+            optional: inner.optional,
+            alternatives: inner.alternatives,
+            span: anchor.elapsed(lexer),
+        }));
+    }
+
+    parse_named_type_info(lexer, errors, allocator)
+}
+
+fn parse_named_type_info<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut ParseErrors<'input, 'allocator>,
+    allocator: &'allocator Bump,
+) -> Option<&'allocator TypeInfo<'input, 'allocator>> {
     let anchor = lexer.cast_anchor();
     let name = parse_literal(lexer)?;
 
@@ -1991,6 +2062,7 @@ pub(super) fn parse_type_info<'input, 'allocator>(
         name,
         parameters,
         optional,
+        alternatives: allocator.alloc_slice_copy(&[]),
         span: anchor.elapsed(lexer),
     }))
 }
@@ -2227,8 +2299,8 @@ mod tests {
     use crate::{
         ast::{
             AccessOperator, AssignValue, BinaryOperator, ClosureBody, Expression,
-            FunctionAttribute, ImportKind, MutationPolicyKind, Pattern, Statement, TypedefValue,
-            Value,
+            FunctionAttribute, ImportKind, MutationPolicyKind, Pattern, Statement, TypeOperator,
+            TypedefValue, Value,
         },
         error::ParseErrorKind,
         lexer::Lexer,
@@ -3548,5 +3620,66 @@ let recovered = true
             panic!("expected recovered binding");
         };
         assert_eq!(recovered.name.value, "recovered");
+    }
+
+    #[test]
+    fn parses_union_type_tests_safe_casts_and_elvis() {
+        let source = r#"
+let value: Int | String = 1
+let number = value as? Int ?: 0
+let text = if value is String {
+    let narrowed = value
+} else {
+    let fallback = "fallback"
+}
+let predicate = inline |candidate: (Int | String)| => candidate is Int
+"#;
+        let allocator = Bump::new();
+        let mut lexer = Lexer::new(source);
+        let mut errors = Vec::new_in(&allocator);
+
+        let ast = parse_source(&mut lexer, &mut errors, &allocator);
+
+        assert!(errors.is_empty(), "parse errors: {errors:#?}");
+        let Statement::LetStatement(value) = ast.statements[0] else {
+            panic!("expected union binding");
+        };
+        let ty = value.type_info.unwrap();
+        assert_eq!(ty.name.value, "Int");
+        assert_eq!(ty.alternatives.len(), 1);
+        assert_eq!(ty.alternatives[0].name.value, "String");
+
+        let Statement::LetStatement(number) = ast.statements[1] else {
+            panic!("expected safe cast binding");
+        };
+        let Expression::Elvis(elvis) = number.value.unwrap() else {
+            panic!("expected elvis expression");
+        };
+        let Expression::TypeOperation(cast) = elvis.optional else {
+            panic!("expected safe cast");
+        };
+        assert_eq!(cast.operator.value, TypeOperator::SafeCast);
+        assert_eq!(cast.target.name.value, "Int");
+
+        let Statement::LetStatement(text) = ast.statements[2] else {
+            panic!("expected type test binding");
+        };
+        let Expression::If(expression) = text.value.unwrap() else {
+            panic!("expected if expression");
+        };
+        let Expression::TypeOperation(test) = expression.branch.condition else {
+            panic!("expected type test");
+        };
+        assert_eq!(test.operator.value, TypeOperator::Is);
+        assert_eq!(test.target.name.value, "String");
+
+        let Statement::LetStatement(predicate) = ast.statements[3] else {
+            panic!("expected predicate binding");
+        };
+        let Expression::Closure(closure) = predicate.value.unwrap() else {
+            panic!("expected closure");
+        };
+        let parameter_type = closure.parameters[0].type_info.unwrap();
+        assert_eq!(parameter_type.alternatives.len(), 1);
     }
 }

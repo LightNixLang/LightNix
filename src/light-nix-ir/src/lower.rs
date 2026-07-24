@@ -7,7 +7,7 @@ use light_nix_name_resolver::{
 use light_nix_parser::ast::{
     AST, AccessOperator, AssignValue, BinaryOperator, Block, ClosureBody, ClosureExpression,
     ElseBranchValue, Expression, FunctionAttribute, LetStatement, Literal, MutationPolicyKind,
-    Pattern, Primary, Source, Statement, Statements, UnaryOperator, Value,
+    Pattern, Primary, Source, Statement, Statements, TypeOperator, UnaryOperator, Value,
 };
 use light_nix_type_checker::{MemberResolution, Type, TypeCheckResult};
 
@@ -325,6 +325,13 @@ impl<'ast, 'input, 'allocator, 'context> Lowerer<'ast, 'input, 'allocator, 'cont
             .collect::<Vec<_>>();
         for (variable, value) in tunables {
             let initial = self.lower_expression(value, guard).expression;
+            let target = self
+                .builder
+                .model()
+                .variable(variable)
+                .map(|variable| variable.ty().clone())
+                .unwrap_or(Type::Error);
+            let initial = self.coerce_expression(initial, &target, value.span());
             if let Err(error) = self.builder.set_variable_initial(variable, initial) {
                 self.build_error(error, value.span());
             }
@@ -377,7 +384,15 @@ impl<'ast, 'input, 'allocator, 'context> Lowerer<'ast, 'input, 'allocator, 'cont
                         }
                     } else if let Some(symbol) = self.symbol_declaration(&node.name) {
                         let value = match node.value {
-                            Some(value) => self.lower_expression(value, guard).expression,
+                            Some(value) => {
+                                let lowered = self.lower_expression(value, guard).expression;
+                                let target = self
+                                    .types
+                                    .symbol_type(symbol)
+                                    .map(|scheme| scheme.ty.clone())
+                                    .unwrap_or(Type::Error);
+                                self.coerce_expression(lowered, &target, value.span())
+                            }
                             None => self.input_for_local(symbol, node),
                         };
                         if let Some(frame) = self.frames.last_mut() {
@@ -438,6 +453,7 @@ impl<'ast, 'input, 'allocator, 'context> Lowerer<'ast, 'input, 'allocator, 'cont
         match value {
             AssignValue::Expression(expression) => {
                 let value = self.lower_expression(expression, guard).expression;
+                let value = self.coerce_expression(value, &target_type, expression.span());
                 let add = self.builder.add_output_case(
                     path,
                     target_type,
@@ -492,6 +508,7 @@ impl<'ast, 'input, 'allocator, 'context> Lowerer<'ast, 'input, 'allocator, 'cont
                 self.unreachable(expected.clone(), block.span.clone())
             }
         });
+        let result = self.coerce_expression(result, expected, block.span.clone());
         if expected != &Type::Never
             && self
                 .builder
@@ -547,6 +564,19 @@ impl<'ast, 'input, 'allocator, 'context> Lowerer<'ast, 'input, 'allocator, 'cont
                     .lower_expression(node.fallback, fallback_guard)
                     .expression;
                 let result = self.builder.elvis(optional, fallback, ty.clone(), origin);
+                self.finish_expression(result, ty, expression.span())
+            }
+            Expression::TypeOperation(node) => {
+                let value = self.lower_expression(node.value, guard).expression;
+                let target = self
+                    .types
+                    .type_info_type(node.target)
+                    .cloned()
+                    .unwrap_or(Type::Error);
+                let result = match node.operator.value {
+                    TypeOperator::Is => self.builder.type_is(value, target, origin),
+                    TypeOperator::SafeCast => self.builder.safe_cast(value, target, origin),
+                };
                 self.finish_expression(result, ty, expression.span())
             }
             Expression::Binary(node) => {
@@ -704,6 +734,7 @@ impl<'ast, 'input, 'allocator, 'context> Lowerer<'ast, 'input, 'allocator, 'cont
             let condition = self.lower_pattern(&arm.pattern, matched, node.value.span());
             let arm_guard = self.and(remaining_guard, condition, arm.span.clone());
             let value = self.lower_expression(arm.value, arm_guard).expression;
+            let value = self.coerce_expression(value, ty, arm.value.span());
             self.frames.pop();
             arms.push((condition, value, arm.span.clone()));
             let not_condition = self.not(condition, arm.span.clone());
@@ -997,12 +1028,26 @@ impl<'ast, 'input, 'allocator, 'context> Lowerer<'ast, 'input, 'allocator, 'cont
                 }
             }
         }
-        if self
+        let current_type = self
             .builder
             .model()
             .expression(current.expression)
-            .is_some_and(|expression| expression.ty() != &final_type)
+            .map(|expression| expression.ty().clone())
+            .unwrap_or(Type::Error);
+        if current_type != final_type
+            && matches!(current_type, Type::Union(_))
+            && current_type.contains_union_alternative(&final_type)
         {
+            let result = self.builder.union_project(
+                current.expression,
+                final_type.clone(),
+                Some(self.origin(primary.span.clone())),
+            );
+            current = LoweredValue {
+                expression: self.finish_expression(result, final_type, primary.span.clone()),
+                path: None,
+            };
+        } else if current_type != final_type {
             self.error(LowerErrorKind::MissingType, primary.span.clone());
         }
         current
@@ -1237,11 +1282,42 @@ impl<'ast, 'input, 'allocator, 'context> Lowerer<'ast, 'input, 'allocator, 'cont
             .map(|scheme| scheme.ty.clone())
             .unwrap_or(Type::Error);
         let expression = match node.value {
-            Some(value) => self.lower_expression(value, guard).expression,
-            None => self.unreachable(ty, node.span.clone()),
+            Some(value) => {
+                let lowered = self.lower_expression(value, guard).expression;
+                self.coerce_expression(lowered, &ty, value.span())
+            }
+            None => self.unreachable(ty.clone(), node.span.clone()),
         };
         self.lowering_symbols.remove(&symbol);
         self.lowered_symbols.insert(symbol, expression);
+        expression
+    }
+
+    fn coerce_expression(
+        &mut self,
+        expression: ExpressionId,
+        expected: &Type,
+        span: std::ops::Range<usize>,
+    ) -> ExpressionId {
+        let Some(found) = self
+            .builder
+            .model()
+            .expression(expression)
+            .map(|expression| expression.ty().clone())
+        else {
+            return expression;
+        };
+        if &found == expected || matches!(found, Type::Never) {
+            return expression;
+        }
+        if matches!(expected, Type::Union(_)) && expected.accepts(&found) {
+            let result = self.builder.union_inject(
+                expression,
+                expected.clone(),
+                Some(self.origin(span.clone())),
+            );
+            return self.finish_expression(result, expected.clone(), span);
+        }
         expression
     }
 
@@ -1478,6 +1554,11 @@ fn substitute_type(ty: &Type, substitutions: &HashMap<GenericParameterId, Type>)
         Type::List(element) => Type::List(Box::new(substitute_type(element, substitutions))),
         Type::AttrSet(element) => Type::AttrSet(Box::new(substitute_type(element, substitutions))),
         Type::Optional(inner) => Type::optional(substitute_type(inner, substitutions)),
+        Type::Union(alternatives) => Type::union(
+            alternatives
+                .iter()
+                .map(|ty| substitute_type(ty, substitutions)),
+        ),
         Type::Named(id, arguments) => Type::Named(
             *id,
             arguments
@@ -1609,6 +1690,10 @@ mod tests {
                 .any(|value| contains_variable(model, *value, variable)),
             ExpressionKind::Some(value)
             | ExpressionKind::OptionalValue(value)
+            | ExpressionKind::UnionInject { value, .. }
+            | ExpressionKind::UnionProject { value, .. }
+            | ExpressionKind::TypeIs { value, .. }
+            | ExpressionKind::SafeCast { value, .. }
             | ExpressionKind::Unary { operand: value, .. } => {
                 contains_variable(model, *value, variable)
             }

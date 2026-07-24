@@ -38,6 +38,9 @@ impl Unifier {
             Type::List(element) => Type::List(Box::new(self.resolve(element))),
             Type::AttrSet(element) => Type::AttrSet(Box::new(self.resolve(element))),
             Type::Optional(inner) => Type::optional(self.resolve(inner)),
+            Type::Union(alternatives) => {
+                Type::union(alternatives.iter().map(|ty| self.resolve(ty)))
+            }
             Type::Named(id, parameters) => {
                 Type::Named(*id, parameters.iter().map(|ty| self.resolve(ty)).collect())
             }
@@ -89,6 +92,14 @@ impl Unifier {
             }
             (Type::Optional(left), Type::Optional(right)) => {
                 Ok(Type::optional(self.unify(left, right)?))
+            }
+            (Type::Union(left), Type::Union(right)) if left.len() == right.len() => {
+                let alternatives = left
+                    .iter()
+                    .zip(right)
+                    .map(|(left, right)| self.unify(left, right))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Type::union(alternatives))
             }
             (Type::Named(left_id, left_args), Type::Named(right_id, right_args))
                 if left_id == right_id && left_args.len() == right_args.len() =>
@@ -159,6 +170,7 @@ impl Unifier {
             | Type::List(element)
             | Type::AttrSet(element)
             | Type::Optional(element) => self.occurs(needle, &element),
+            Type::Union(alternatives) => alternatives.iter().any(|ty| self.occurs(needle, ty)),
             Type::Named(_, parameters) => parameters.iter().any(|ty| self.occurs(needle, ty)),
             Type::Function(function) => {
                 function.parameters.iter().any(|ty| self.occurs(needle, ty))

@@ -231,6 +231,22 @@ pub enum ExpressionKind {
     Some(ExpressionId),
     Null,
     OptionalValue(ExpressionId),
+    UnionInject {
+        value: ExpressionId,
+        union: Type,
+    },
+    UnionProject {
+        value: ExpressionId,
+        target: Type,
+    },
+    TypeIs {
+        value: ExpressionId,
+        target: Type,
+    },
+    SafeCast {
+        value: ExpressionId,
+        target: Type,
+    },
     Unary {
         operation: UnaryOperation,
         operand: ExpressionId,

@@ -401,6 +401,7 @@ pub enum Expression<'input, 'allocator> {
     Throw(&'allocator ThrowExpression<'input, 'allocator>),
     Closure(&'allocator ClosureExpression<'input, 'allocator>),
     Elvis(&'allocator ElvisExpression<'input, 'allocator>),
+    TypeOperation(&'allocator TypeOperationExpression<'input, 'allocator>),
     Binary(&'allocator BinaryExpression<'input, 'allocator>),
     Unary(&'allocator UnaryExpression<'input, 'allocator>),
     Primary(&'allocator Primary<'input, 'allocator>),
@@ -415,6 +416,7 @@ impl AST for Expression<'_, '_> {
             Self::Throw(node) => node.span(),
             Self::Closure(node) => node.span(),
             Self::Elvis(node) => node.span(),
+            Self::TypeOperation(node) => node.span(),
             Self::Binary(node) => node.span(),
             Self::Unary(node) => node.span(),
             Self::Primary(node) => node.span(),
@@ -579,6 +581,22 @@ pub struct ElvisExpression<'input, 'allocator> {
 }
 
 impl_ast!(impl<'input, 'allocator> for ElvisExpression<'input, 'allocator>);
+
+#[derive(Debug)]
+pub struct TypeOperationExpression<'input, 'allocator> {
+    pub value: &'allocator Expression<'input, 'allocator>,
+    pub operator: Spanned<TypeOperator>,
+    pub target: &'allocator TypeInfo<'input, 'allocator>,
+    pub span: Range<usize>,
+}
+
+impl_ast!(impl<'input, 'allocator> for TypeOperationExpression<'input, 'allocator>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TypeOperator {
+    Is,
+    SafeCast,
+}
 
 #[derive(Debug)]
 pub struct BinaryExpression<'input, 'allocator> {
@@ -765,6 +783,7 @@ pub struct TypeInfo<'input, 'allocator> {
     pub name: Literal<'input>,
     pub parameters: &'allocator [&'allocator TypeInfo<'input, 'allocator>],
     pub optional: bool,
+    pub alternatives: &'allocator [&'allocator TypeInfo<'input, 'allocator>],
     pub span: Range<usize>,
 }
 

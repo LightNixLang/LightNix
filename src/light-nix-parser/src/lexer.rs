@@ -13,6 +13,8 @@ pub enum TokenKind {
     From,
     /// as
     As,
+    /// is
+    Is,
     /// enum
     Enum,
     /// type
@@ -149,6 +151,7 @@ static TOKENIZERS: &[Tokenizer] = &[
     Tokenizer::Keyword(TokenKind::Export, "export"),
     Tokenizer::Keyword(TokenKind::From, "from"),
     Tokenizer::Keyword(TokenKind::As, "as"),
+    Tokenizer::Keyword(TokenKind::Is, "is"),
     Tokenizer::Keyword(TokenKind::Enum, "enum"),
     Tokenizer::Keyword(TokenKind::Type, "type"),
     Tokenizer::Keyword(TokenKind::Interface, "interface"),

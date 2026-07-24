@@ -97,10 +97,11 @@ mod grammar {
         closure_expression   ::= function_attribute "|" [ lf ]
                                  { closure_parameter [ lf_or_comma ] } "|"
                                  [ "->" type_info ] [ lf ] "=>" [ lf ] closure_body
-        closure_parameter    ::= literal [ ":" type_info ]
+        closure_parameter    ::= literal [ ":" atomic_type ]
         closure_body         ::= expression | block
 
         elvis_expr           ::= or_expr [ "?:" expression ]
+        type_operation_expr  ::= equ_or_ine_expr [ ( "is" type_info ) | ( "as" "?" type_info ) ]
 
         if_expression        ::= if_branch { "else" ( if_branch | block ) }
         if_branch            ::= "if" expression block
@@ -116,7 +117,7 @@ mod grammar {
         throw_expression     ::= "throw" expression
 
         or_expr              ::= and_expr { "or" and_expr }
-        and_expr             ::= equ_or_ine_expr { "and" equ_or_ine_expr }
+        and_expr             ::= type_operation_expr { "and" type_operation_expr }
         equ_or_ine_expr      ::= les_or_gre_expr [ ( "==" | "!=" ) les_or_gre_expr ]
         les_or_gre_expr      ::= add_or_sub_expr [ ( "<" | ">" | "<=" | ">=" ) add_or_sub_expr ]
         add_or_sub_expr      ::= mul_or_div_expr { ( "+" | "-" ) mul_or_div_expr }
@@ -142,7 +143,9 @@ mod grammar {
         type_arguments       ::= ":" "<" [ lf ] { type_argument [ lf_or_comma ] } ">"
         type_argument        ::= type_info | "_"
 
-        type_info            ::= literal [ "<" [ lf ] { type_info [ lf_or_comma ] } ">" ] [ "?" ]
+        type_info            ::= atomic_type { "|" [ lf ] atomic_type }
+        atomic_type          ::= named_type | "(" [ lf ] type_info [ lf ] ")"
+        named_type           ::= literal [ "<" [ lf ] { type_info [ lf_or_comma ] } ">" ] [ "?" ]
 
         literal              ::= r"\w+"
 

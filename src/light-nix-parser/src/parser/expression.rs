@@ -8,8 +8,8 @@ use crate::{
         EnumVariantPattern, ExplicitTypeArgument, ExplicitTypeArguments, Expression,
         FunctionAttribute, FunctionCall, IfBranch, IfExpression, Literal, LiteralValue, MatchArm,
         MatchExpression, Pattern, Primary, PrimaryAccess, PrimaryAccessMember, ReturnExpression,
-        SomePattern, SomeValue, Spanned, StringLiteral, ThrowExpression, UnaryExpression,
-        UnaryOperator, Value,
+        SomePattern, SomeValue, Spanned, StringLiteral, ThrowExpression, TypeOperationExpression,
+        TypeOperator, UnaryExpression, UnaryOperator, Value,
     },
     error::{Expected, ParseErrorKind, Scope, error_here, recover_until},
     lexer::{Lexer, TokenKind},
@@ -17,7 +17,7 @@ use crate::{
 
 use super::{
     ParseErrors, current_kind, is_statement_start, skip_line_feed, skip_list_separator,
-    statement::{parse_block, parse_type_info},
+    statement::{parse_block, parse_type_atom, parse_type_info},
 };
 
 pub(super) fn parse_expression<'input, 'allocator>(
@@ -90,7 +90,7 @@ fn parse_closure_expression<'input, 'allocator>(
         };
         let type_info = if current_kind(lexer) == TokenKind::Colon {
             lexer.next();
-            let ty = parse_type_info(lexer, errors, allocator);
+            let ty = parse_type_atom(lexer, errors, allocator);
             if ty.is_none() {
                 errors.push(error_here(
                     ParseErrorKind::InvalidClosureParameter,
@@ -183,7 +183,7 @@ fn parse_elvis_expression<'input, 'allocator>(
     errors: &mut ParseErrors<'input, 'allocator>,
     allocator: &'allocator Bump,
 ) -> Option<&'allocator Expression<'input, 'allocator>> {
-    let optional = parse_binary_expression(lexer, errors, allocator, 1)?;
+    let optional = parse_logical_expression(lexer, errors, allocator, 1)?;
     if current_kind(lexer) != TokenKind::Elvis {
         return Some(optional);
     }
@@ -250,6 +250,90 @@ fn parse_binary_expression<'input, 'allocator>(
     }
 
     Some(left)
+}
+
+fn parse_logical_expression<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut ParseErrors<'input, 'allocator>,
+    allocator: &'allocator Bump,
+    minimum_precedence: u8,
+) -> Option<&'allocator Expression<'input, 'allocator>> {
+    let mut left = parse_type_operation_expression(lexer, errors, allocator)?;
+    loop {
+        let Some((operator, precedence)) = binary_operator(current_kind(lexer)) else {
+            break;
+        };
+        if precedence > 2 || precedence < minimum_precedence {
+            break;
+        }
+        let operator_token = lexer.next().unwrap();
+        let operator = Spanned::new(operator, operator_token.span);
+        let Some(right) = parse_logical_expression(lexer, errors, allocator, precedence + 1) else {
+            errors.push(error_here(
+                ParseErrorKind::InvalidExpression,
+                lexer,
+                Expected::Expression,
+                Scope::Expression,
+            ));
+            break;
+        };
+        let span = left.span().start..right.span().end;
+        left = allocator.alloc(Expression::Binary(allocator.alloc(BinaryExpression {
+            left,
+            operator,
+            right,
+            span,
+        })));
+    }
+    Some(left)
+}
+
+fn parse_type_operation_expression<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut ParseErrors<'input, 'allocator>,
+    allocator: &'allocator Bump,
+) -> Option<&'allocator Expression<'input, 'allocator>> {
+    let value = parse_binary_expression(lexer, errors, allocator, 3)?;
+    let (operator, operator_span) = match current_kind(lexer) {
+        TokenKind::Is => {
+            let token = lexer.next().unwrap();
+            (TypeOperator::Is, token.span)
+        }
+        TokenKind::As => {
+            let token = lexer.next().unwrap();
+            if current_kind(lexer) != TokenKind::Question {
+                errors.push(error_here(
+                    ParseErrorKind::InvalidTypeOperation,
+                    lexer,
+                    Expected::Token(TokenKind::Question),
+                    Scope::TypeOperation,
+                ));
+                return Some(value);
+            }
+            let end = lexer.next().unwrap().span.end;
+            (TypeOperator::SafeCast, token.span.start..end)
+        }
+        _ => return Some(value),
+    };
+    skip_line_feed(lexer);
+    let Some(target) = parse_type_info(lexer, errors, allocator) else {
+        errors.push(error_here(
+            ParseErrorKind::InvalidTypeOperation,
+            lexer,
+            Expected::TypeInfo,
+            Scope::TypeOperation,
+        ));
+        return Some(value);
+    };
+    let span = value.span().start..target.span.end;
+    Some(allocator.alloc(Expression::TypeOperation(allocator.alloc(
+        TypeOperationExpression {
+            value,
+            operator: Spanned::new(operator, operator_span),
+            target,
+            span,
+        },
+    ))))
 }
 
 fn parse_factor<'input, 'allocator>(

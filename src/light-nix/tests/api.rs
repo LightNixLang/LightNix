@@ -415,3 +415,87 @@ let observedDevice = fileSystems["/"].device
     );
     assert!(plan.side_effects().next().is_none());
 }
+
+#[test]
+fn union_safe_cast_and_elvis_are_tracked_through_z3() {
+    let source = r#"
+type Result {
+    value: Int
+    casted: Int
+    isInt: Bool
+    matched: Int | String
+}
+let tunable(cost = 6) choice: Int | String = "not-an-int"
+declare let result: Result
+if choice is Int {
+    result.value = choice
+} else {
+    result.value = 0
+}
+result.casted = choice as? Int ?: 0
+result.isInt = choice is Int
+result.matched = match choice as? Int {
+    some(value) => value
+    null => "none"
+}
+"#;
+    let arena = AstArena::new();
+    let analysis = analyze_module(source, &arena, ModuleId(0), &AnalysisEnvironment::default());
+    assert!(
+        analysis.is_success(),
+        "parse={:?}\nname={:?}\ntype={:?}\ndependency={:?}\nlower={:?}",
+        analysis.parse_errors(),
+        analysis.name_errors(),
+        analysis.type_errors(),
+        analysis.dependency_errors(),
+        analysis.lower_errors(),
+    );
+
+    let path = analysis
+        .output_path("result.value")
+        .expect("result value output")
+        .clone();
+    let is_int = analysis
+        .output_path("result.isInt")
+        .expect("type-test output")
+        .clone();
+    let casted = analysis
+        .output_path("result.casted")
+        .expect("safe-cast output")
+        .clone();
+    let matched = analysis
+        .output_path("result.matched")
+        .expect("union match output")
+        .clone();
+    let mut request = PlanningRequest::new();
+    request.require_output(path.clone(), Constant::Int(7));
+    request.require_output(casted.clone(), Constant::Int(7));
+    request.require_output(is_int.clone(), Constant::Bool(true));
+    request.require_output(matched.clone(), Constant::Int(7));
+    let PlanOutcome::Applicable(plan) = analysis
+        .plan(&EvaluationInputs::default(), &request)
+        .unwrap()
+    else {
+        panic!("expected an applicable plan");
+    };
+
+    assert_eq!(plan.solution().cost, 6);
+    assert_eq!(plan.solution().variables.len(), 1);
+    assert_eq!(plan.solution().variables[0].after, Constant::Int(7));
+    assert_eq!(
+        plan.after().get(&path).map(|entry| &entry.value),
+        Some(&RuntimeValue::Int(7))
+    );
+    assert_eq!(
+        plan.after().get(&casted).map(|entry| &entry.value),
+        Some(&RuntimeValue::Int(7))
+    );
+    assert_eq!(
+        plan.after().get(&is_int).map(|entry| &entry.value),
+        Some(&RuntimeValue::Bool(true))
+    );
+    assert_eq!(
+        plan.after().get(&matched).map(|entry| &entry.value),
+        Some(&RuntimeValue::Int(7))
+    );
+}
