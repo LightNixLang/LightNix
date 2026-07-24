@@ -363,6 +363,11 @@ impl<'ast> NameResolution<'ast> {
         self.names.get(id)
     }
 
+    pub fn resolve_root_name(&self, namespace: Namespace, name: &str) -> Option<Res> {
+        let name = self.names.ids.get(name)?;
+        self.scopes[self.root_scope.0 as usize].get(namespace, *name)
+    }
+
     pub fn symbols(&self) -> &[Symbol<'ast>] {
         &self.symbols
     }

@@ -44,8 +44,8 @@ impl LowerResult {
 
 pub fn lower_module<'ast, 'input, 'allocator>(
     source: &'ast Source<'input, 'allocator>,
-    resolution: &'ast NameResolution<'ast>,
-    types: &'ast TypeCheckResult<'ast>,
+    resolution: &NameResolution<'ast>,
+    types: &TypeCheckResult<'ast>,
 ) -> LowerResult {
     Lowerer::new(resolution, types).lower(source)
 }
@@ -56,9 +56,9 @@ struct LoweredValue {
     path: Option<OutputPath>,
 }
 
-struct Lowerer<'ast, 'input, 'allocator> {
-    resolution: &'ast NameResolution<'ast>,
-    types: &'ast TypeCheckResult<'ast>,
+struct Lowerer<'ast, 'input, 'allocator, 'context> {
+    resolution: &'context NameResolution<'ast>,
+    types: &'context TypeCheckResult<'ast>,
     module: ModuleId,
     builder: ModelBuilder,
     top_level_lets: BTreeMap<SymbolId, &'ast LetStatement<'input, 'allocator>>,
@@ -71,8 +71,11 @@ struct Lowerer<'ast, 'input, 'allocator> {
     true_expression: Option<ExpressionId>,
 }
 
-impl<'ast, 'input, 'allocator> Lowerer<'ast, 'input, 'allocator> {
-    fn new(resolution: &'ast NameResolution<'ast>, types: &'ast TypeCheckResult<'ast>) -> Self {
+impl<'ast, 'input, 'allocator, 'context> Lowerer<'ast, 'input, 'allocator, 'context> {
+    fn new(
+        resolution: &'context NameResolution<'ast>,
+        types: &'context TypeCheckResult<'ast>,
+    ) -> Self {
         let module = resolution.module();
         Self {
             resolution,

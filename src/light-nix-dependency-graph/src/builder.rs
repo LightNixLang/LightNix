@@ -13,7 +13,7 @@ use crate::{
 
 pub fn build_dependency_graph<'ast, 'input, 'allocator>(
     source: &'ast Source<'input, 'allocator>,
-    resolution: &'ast NameResolution<'ast>,
+    resolution: &NameResolution<'ast>,
 ) -> DependencyGraph {
     Builder {
         resolution,
@@ -29,8 +29,8 @@ pub fn build_dependency_graph<'ast, 'input, 'allocator>(
 
 pub fn refine_dependency_graph<'ast, 'input, 'allocator>(
     source: &'ast Source<'input, 'allocator>,
-    resolution: &'ast NameResolution<'ast>,
-    types: &'ast TypeCheckResult<'ast>,
+    resolution: &NameResolution<'ast>,
+    types: &TypeCheckResult<'ast>,
     graph: &mut DependencyGraph,
 ) {
     let owned = std::mem::take(graph);
@@ -46,17 +46,17 @@ pub fn refine_dependency_graph<'ast, 'input, 'allocator>(
     .build(source);
 }
 
-struct Builder<'ast, 'input, 'allocator> {
-    resolution: &'ast NameResolution<'ast>,
+struct Builder<'ast, 'input, 'allocator, 'context> {
+    resolution: &'context NameResolution<'ast>,
     graph: DependencyGraph,
     owner: Option<DependencyNodeId>,
     next_statement: u32,
     collect_base: bool,
-    types: Option<&'ast TypeCheckResult<'ast>>,
+    types: Option<&'context TypeCheckResult<'ast>>,
     marker: PhantomData<(&'input (), &'allocator ())>,
 }
 
-impl<'ast, 'input, 'allocator> Builder<'ast, 'input, 'allocator> {
+impl<'ast, 'input, 'allocator, 'context> Builder<'ast, 'input, 'allocator, 'context> {
     fn build(mut self, source: &'ast Source<'input, 'allocator>) -> DependencyGraph {
         self.visit_statements(source, true);
         self.graph

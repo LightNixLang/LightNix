@@ -142,6 +142,7 @@ impl<'a> Encoder<'a> {
         for goal in self.request.goals() {
             self.encode_goal(goal)?;
         }
+        self.encode_exclusions()?;
 
         let costs = self.change_costs()?;
         let total_cost = if costs.is_empty() {
@@ -206,8 +207,89 @@ impl<'a> Encoder<'a> {
                 let output = self.encode_output(path)?;
                 self.optimize.assert(output.actual_present.not());
             }
+            OutputGoal::Contains { path, value } | OutputGoal::NotContains { path, value } => {
+                let declaration = self
+                    .source
+                    .path(path)
+                    .ok_or_else(|| error(SolveErrorKind::UnknownOutput(path.clone())))?;
+                let Type::Set(element_type) = declaration.ty() else {
+                    return Err(self
+                        .type_error(&Type::Set(Box::new(Type::Error)), declaration.ty().clone()));
+                };
+                let output = self.encode_output(path)?;
+                let member = self.set_contains(&output.actual_value, element_type, value)?;
+                self.optimize.assert(&output.actual_present);
+                if matches!(goal, OutputGoal::Contains { .. }) {
+                    self.optimize.assert(member);
+                } else {
+                    self.optimize.assert(member.not());
+                }
+            }
         }
         Ok(())
+    }
+
+    fn encode_exclusions(&mut self) -> Result<(), SolveError> {
+        for exclusion in self.request.excluded_candidates() {
+            let mut differences = Vec::new();
+            for (variable, value) in &exclusion.variable_values {
+                let declaration = self
+                    .source
+                    .variable(*variable)
+                    .ok_or_else(|| error(SolveErrorKind::UnknownVariable(*variable)))?;
+                let actual = self.encode_variable(*variable)?;
+                let excluded = self.encode_constant(declaration.ty(), value)?;
+                differences.push(self.value_eq(&actual, &excluded)?.not());
+            }
+            for (path, value) in &exclusion.output_values {
+                let declaration = self
+                    .source
+                    .path(path)
+                    .ok_or_else(|| error(SolveErrorKind::UnknownOutput(path.clone())))?;
+                let output = self.encode_output(path)?;
+                match value {
+                    Some(value) => {
+                        let excluded = self.encode_constant(declaration.ty(), value)?;
+                        let same = Bool::and(&[
+                            output.actual_present,
+                            self.value_eq(&output.actual_value, &excluded)?,
+                        ]);
+                        differences.push(same.not());
+                    }
+                    None => differences.push(output.actual_present),
+                }
+            }
+            self.optimize.assert(bool_or(differences));
+        }
+        Ok(())
+    }
+
+    fn set_contains(
+        &self,
+        set: &EncodedValue,
+        element_type: &Type,
+        value: &Constant,
+    ) -> Result<Bool, SolveError> {
+        let EncodedValue::Set {
+            universe, members, ..
+        } = set
+        else {
+            return Err(self.type_error(
+                &Type::Set(Box::new(element_type.clone())),
+                encoded_type(set),
+            ));
+        };
+        let value = self.encode_constant(element_type, value)?;
+        let alternatives = universe
+            .iter()
+            .zip(members)
+            .map(|(candidate, member)| {
+                let candidate = self.encode_constant(element_type, candidate)?;
+                let equal = self.value_eq(&value, &candidate)?;
+                Ok(Bool::and(&[member.clone(), equal]))
+            })
+            .collect::<Result<Vec<_>, SolveError>>()?;
+        Ok(bool_or(alternatives))
     }
 
     fn change_costs(&self) -> Result<Vec<Int>, SolveError> {
@@ -1553,10 +1635,32 @@ fn collect_universes(
         }
     }
     for goal in request.goals() {
-        if let OutputGoal::Equals { path, value } = goal
-            && let Some(declaration) = model.path(path)
-        {
-            collect_constant_universe(declaration.ty(), value, &mut universes);
+        match goal {
+            OutputGoal::Equals { path, value } => {
+                if let Some(declaration) = model.path(path) {
+                    collect_constant_universe(declaration.ty(), value, &mut universes);
+                }
+            }
+            OutputGoal::Contains { path, value } | OutputGoal::NotContains { path, value } => {
+                if let Some(declaration) = model.path(path)
+                    && let Type::Set(element) = declaration.ty()
+                {
+                    collect_constant_universe(element, value, &mut universes);
+                }
+            }
+            OutputGoal::Absent { .. } => {}
+        }
+    }
+    for exclusion in request.excluded_candidates() {
+        for (variable, value) in &exclusion.variable_values {
+            if let Some(variable) = model.variable(*variable) {
+                collect_constant_universe(variable.ty(), value, &mut universes);
+            }
+        }
+        for (path, value) in &exclusion.output_values {
+            if let (Some(declaration), Some(value)) = (model.path(path), value) {
+                collect_constant_universe(declaration.ty(), value, &mut universes);
+            }
         }
     }
     universes
@@ -1583,10 +1687,32 @@ fn collect_enum_universes(
         }
     }
     for goal in request.goals() {
-        if let OutputGoal::Equals { path, value } = goal
-            && let Some(declaration) = model.path(path)
-        {
-            collect_enum_constant(declaration.ty(), value, &mut universes);
+        match goal {
+            OutputGoal::Equals { path, value } => {
+                if let Some(declaration) = model.path(path) {
+                    collect_enum_constant(declaration.ty(), value, &mut universes);
+                }
+            }
+            OutputGoal::Contains { path, value } | OutputGoal::NotContains { path, value } => {
+                if let Some(declaration) = model.path(path)
+                    && let Type::Set(element) = declaration.ty()
+                {
+                    collect_enum_constant(element, value, &mut universes);
+                }
+            }
+            OutputGoal::Absent { .. } => {}
+        }
+    }
+    for exclusion in request.excluded_candidates() {
+        for (variable, value) in &exclusion.variable_values {
+            if let Some(variable) = model.variable(*variable) {
+                collect_enum_constant(variable.ty(), value, &mut universes);
+            }
+        }
+        for (path, value) in &exclusion.output_values {
+            if let (Some(declaration), Some(value)) = (model.path(path), value) {
+                collect_enum_constant(declaration.ty(), value, &mut universes);
+            }
         }
     }
     universes

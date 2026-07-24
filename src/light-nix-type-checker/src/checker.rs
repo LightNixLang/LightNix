@@ -181,6 +181,23 @@ impl<'ast> TypeCheckResult<'ast> {
         self.field_types.get(&field)
     }
 
+    pub fn named_field(&self, receiver: &Type, name: &str) -> Option<(FieldId, Type)> {
+        let Type::Named(owner, arguments) = receiver else {
+            return None;
+        };
+        let field = *self.field_lookup.get(&(*owner, name.to_owned()))?;
+        let field_type = self.field_types.get(&field)?;
+        let substitutions = self
+            .type_parameters
+            .get(owner)
+            .into_iter()
+            .flatten()
+            .copied()
+            .zip(arguments.iter().cloned())
+            .collect();
+        Some((field, substitute(field_type, &substitutions)))
+    }
+
     pub fn type_parameters(&self, ty: TypeDefId) -> &[GenericParameterId] {
         self.type_parameters.get(&ty).map_or(&[], Vec::as_slice)
     }
@@ -202,7 +219,7 @@ impl<'ast> TypeCheckResult<'ast> {
 
 pub fn check_module<'ast, 'input, 'allocator>(
     source: &'ast Source<'input, 'allocator>,
-    resolution: &'ast NameResolution<'ast>,
+    resolution: &NameResolution<'ast>,
     environment: &TypeEnvironment,
 ) -> TypeCheckResult<'ast> {
     Checker::new(source, resolution, environment).check()
@@ -270,9 +287,9 @@ enum PrimaryState {
     Error,
 }
 
-struct Checker<'ast, 'input, 'allocator, 'environment> {
+struct Checker<'ast, 'input, 'allocator, 'context, 'environment> {
     source: &'ast Source<'input, 'allocator>,
-    resolution: &'ast NameResolution<'ast>,
+    resolution: &'context NameResolution<'ast>,
     environment: &'environment TypeEnvironment,
     unifier: Unifier,
     expression_types: HashMap<AstId<'ast>, Type>,
@@ -296,10 +313,12 @@ struct Checker<'ast, 'input, 'allocator, 'environment> {
     errors: Vec<TypeCheckError>,
 }
 
-impl<'ast, 'input, 'allocator, 'environment> Checker<'ast, 'input, 'allocator, 'environment> {
+impl<'ast, 'input, 'allocator, 'context, 'environment>
+    Checker<'ast, 'input, 'allocator, 'context, 'environment>
+{
     fn new(
         source: &'ast Source<'input, 'allocator>,
-        resolution: &'ast NameResolution<'ast>,
+        resolution: &'context NameResolution<'ast>,
         environment: &'environment TypeEnvironment,
     ) -> Self {
         let mut symbol_types = environment.symbols.clone();

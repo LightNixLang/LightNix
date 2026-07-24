@@ -20,6 +20,7 @@ use crate::{
 pub struct EvaluationInputs {
     values: HashMap<SymbolId, RuntimeValue>,
     tunable_overrides: HashMap<SymbolId, RuntimeValue>,
+    output_overrides: HashMap<OutputPath, OutputOverride>,
 }
 
 impl EvaluationInputs {
@@ -30,6 +31,22 @@ impl EvaluationInputs {
     pub fn override_tunable(&mut self, symbol: SymbolId, value: RuntimeValue) {
         self.tunable_overrides.insert(symbol, value);
     }
+
+    pub fn override_output(
+        &mut self,
+        path: OutputPath,
+        value: Option<RuntimeValue>,
+        origin: SourceOrigin,
+    ) {
+        self.output_overrides
+            .insert(path, OutputOverride { value, origin });
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OutputOverride {
+    value: Option<RuntimeValue>,
+    origin: SourceOrigin,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -75,8 +92,8 @@ impl EvaluationResult {
 
 pub fn evaluate_module<'ast, 'input, 'allocator>(
     source: &'ast Source<'input, 'allocator>,
-    resolution: &'ast NameResolution<'ast>,
-    types: &'ast TypeCheckResult<'ast>,
+    resolution: &NameResolution<'ast>,
+    types: &TypeCheckResult<'ast>,
     inputs: &EvaluationInputs,
 ) -> EvaluationResult {
     Evaluator::new(resolution, types, inputs).evaluate(source)
@@ -123,9 +140,9 @@ enum Signal {
 
 type Eval<T> = Result<T, Signal>;
 
-struct Evaluator<'ast, 'input, 'allocator, 'inputs> {
-    resolution: &'ast NameResolution<'ast>,
-    types: &'ast TypeCheckResult<'ast>,
+struct Evaluator<'ast, 'input, 'allocator, 'context, 'inputs> {
+    resolution: &'context NameResolution<'ast>,
+    types: &'context TypeCheckResult<'ast>,
     inputs: &'inputs EvaluationInputs,
     module: ModuleId,
     top_level_lets: HashMap<SymbolId, &'ast LetStatement<'input, 'allocator>>,
@@ -143,10 +160,12 @@ struct Evaluator<'ast, 'input, 'allocator, 'inputs> {
     errors: Vec<EvaluationError>,
 }
 
-impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inputs> {
+impl<'ast, 'input, 'allocator, 'context, 'inputs>
+    Evaluator<'ast, 'input, 'allocator, 'context, 'inputs>
+{
     fn new(
-        resolution: &'ast NameResolution<'ast>,
-        types: &'ast TypeCheckResult<'ast>,
+        resolution: &'context NameResolution<'ast>,
+        types: &'context TypeCheckResult<'ast>,
         inputs: &'inputs EvaluationInputs,
     ) -> Self {
         Self {
@@ -172,6 +191,20 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
 
     fn evaluate(mut self, source: &'ast Source<'input, 'allocator>) -> EvaluationResult {
         self.register_module(source);
+        for (path, output) in &self.inputs.output_overrides {
+            let Some(value) = &output.value else {
+                continue;
+            };
+            self.snapshot.insert(
+                path.clone(),
+                OutputEntry {
+                    value: value.clone(),
+                    dependencies: BTreeSet::new(),
+                    opaque_dependencies: BTreeSet::new(),
+                    origin: output.origin.clone(),
+                },
+            );
+        }
         if let Err(Signal::Return(_)) = self.eval_statements(source, true) {
             // The type checker owns the diagnostic for a module-level return.
         }
@@ -328,6 +361,9 @@ impl<'ast, 'input, 'allocator, 'inputs> Evaluator<'ast, 'input, 'allocator, 'inp
                         node.target.span(),
                     );
                 };
+                if self.inputs.output_overrides.contains_key(&path) {
+                    return Ok(TrackedValue::pure(RuntimeValue::Unit));
+                }
                 let mut value = self.eval_expression(node.value)?;
                 value
                     .dependencies
