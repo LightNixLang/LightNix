@@ -16,8 +16,8 @@ use z3::{
 };
 
 use crate::{
-    OpaqueImpact, OutputChange, OutputGoal, Solution, SolveError, SolveErrorKind, SolveOutcome,
-    SolveRequest, UnknownReason, VariableChange,
+    OpaqueImpact, OutputChange, OutputConstraint, OutputGoal, Solution, SolveError, SolveErrorKind,
+    SolveOutcome, SolveRequest, UnknownReason, VariableChange,
 };
 
 pub fn solve(model: &ConstraintModel, request: &SolveRequest) -> Result<SolveOutcome, SolveError> {
@@ -142,6 +142,9 @@ impl<'a> Encoder<'a> {
         for goal in self.request.goals() {
             self.encode_goal(goal)?;
         }
+        for constraint in self.request.constraints() {
+            self.encode_external_constraint(constraint)?;
+        }
         self.encode_exclusions()?;
 
         let costs = self.change_costs()?;
@@ -188,7 +191,37 @@ impl<'a> Encoder<'a> {
     }
 
     fn encode_goal(&mut self, goal: &OutputGoal) -> Result<(), SolveError> {
-        match goal {
+        let predicate = self.encode_output_predicate(goal)?;
+        self.optimize.assert(predicate);
+        Ok(())
+    }
+
+    fn encode_external_constraint(
+        &mut self,
+        constraint: &OutputConstraint,
+    ) -> Result<(), SolveError> {
+        let condition = match constraint {
+            OutputConstraint::Required(predicate) => self.encode_output_predicate(predicate)?,
+            OutputConstraint::Implies {
+                condition,
+                consequence,
+            } => {
+                let condition = self.encode_output_predicate(condition)?;
+                let consequence = self.encode_output_predicate(consequence)?;
+                condition.implies(&consequence)
+            }
+            OutputConstraint::Conflicts { left, right } => {
+                let left = self.encode_output_predicate(left)?;
+                let right = self.encode_output_predicate(right)?;
+                Bool::and(&[left, right]).not()
+            }
+        };
+        self.optimize.assert(condition);
+        Ok(())
+    }
+
+    fn encode_output_predicate(&mut self, goal: &OutputGoal) -> Result<Bool, SolveError> {
+        Ok(match goal {
             OutputGoal::Equals { path, value } => {
                 let declaration = self
                     .source
@@ -196,16 +229,17 @@ impl<'a> Encoder<'a> {
                     .ok_or_else(|| error(SolveErrorKind::UnknownOutput(path.clone())))?;
                 let output = self.encode_output(path)?;
                 let expected = self.encode_constant(declaration.ty(), value)?;
-                self.optimize.assert(&output.actual_present);
-                self.optimize
-                    .assert(self.value_eq(&output.actual_value, &expected)?);
+                Bool::and(&[
+                    output.actual_present,
+                    self.value_eq(&output.actual_value, &expected)?,
+                ])
             }
             OutputGoal::Absent { path } => {
                 if self.source.path(path).is_none() {
                     return Err(error(SolveErrorKind::UnknownOutput(path.clone())));
                 }
                 let output = self.encode_output(path)?;
-                self.optimize.assert(output.actual_present.not());
+                output.actual_present.not()
             }
             OutputGoal::Contains { path, value } | OutputGoal::NotContains { path, value } => {
                 let declaration = self
@@ -218,15 +252,13 @@ impl<'a> Encoder<'a> {
                 };
                 let output = self.encode_output(path)?;
                 let member = self.set_contains(&output.actual_value, element_type, value)?;
-                self.optimize.assert(&output.actual_present);
                 if matches!(goal, OutputGoal::Contains { .. }) {
-                    self.optimize.assert(member);
+                    Bool::and(&[output.actual_present, member])
                 } else {
-                    self.optimize.assert(member.not());
+                    Bool::and(&[output.actual_present, member.not()])
                 }
             }
-        }
-        Ok(())
+        })
     }
 
     fn encode_exclusions(&mut self) -> Result<(), SolveError> {
@@ -1635,20 +1667,13 @@ fn collect_universes(
         }
     }
     for goal in request.goals() {
-        match goal {
-            OutputGoal::Equals { path, value } => {
-                if let Some(declaration) = model.path(path) {
-                    collect_constant_universe(declaration.ty(), value, &mut universes);
-                }
-            }
-            OutputGoal::Contains { path, value } | OutputGoal::NotContains { path, value } => {
-                if let Some(declaration) = model.path(path)
-                    && let Type::Set(element) = declaration.ty()
-                {
-                    collect_constant_universe(element, value, &mut universes);
-                }
-            }
-            OutputGoal::Absent { .. } => {}
+        collect_goal_constant_universe(model, goal, &mut universes);
+    }
+    for constraint in request.constraints() {
+        let (first, second) = constraint_predicates(constraint);
+        collect_goal_constant_universe(model, first, &mut universes);
+        if let Some(second) = second {
+            collect_goal_constant_universe(model, second, &mut universes);
         }
     }
     for exclusion in request.excluded_candidates() {
@@ -1687,20 +1712,13 @@ fn collect_enum_universes(
         }
     }
     for goal in request.goals() {
-        match goal {
-            OutputGoal::Equals { path, value } => {
-                if let Some(declaration) = model.path(path) {
-                    collect_enum_constant(declaration.ty(), value, &mut universes);
-                }
-            }
-            OutputGoal::Contains { path, value } | OutputGoal::NotContains { path, value } => {
-                if let Some(declaration) = model.path(path)
-                    && let Type::Set(element) = declaration.ty()
-                {
-                    collect_enum_constant(element, value, &mut universes);
-                }
-            }
-            OutputGoal::Absent { .. } => {}
+        collect_goal_enum_universe(model, goal, &mut universes);
+    }
+    for constraint in request.constraints() {
+        let (first, second) = constraint_predicates(constraint);
+        collect_goal_enum_universe(model, first, &mut universes);
+        if let Some(second) = second {
+            collect_goal_enum_universe(model, second, &mut universes);
         }
     }
     for exclusion in request.excluded_candidates() {
@@ -1716,6 +1734,61 @@ fn collect_enum_universes(
         }
     }
     universes
+}
+
+fn constraint_predicates(constraint: &OutputConstraint) -> (&OutputGoal, Option<&OutputGoal>) {
+    match constraint {
+        OutputConstraint::Required(predicate) => (predicate, None),
+        OutputConstraint::Implies {
+            condition,
+            consequence,
+        } => (condition, Some(consequence)),
+        OutputConstraint::Conflicts { left, right } => (left, Some(right)),
+    }
+}
+
+fn collect_goal_constant_universe(
+    model: &ConstraintModel,
+    goal: &OutputGoal,
+    universes: &mut Vec<(Type, Vec<Constant>)>,
+) {
+    match goal {
+        OutputGoal::Equals { path, value } => {
+            if let Some(declaration) = model.path(path) {
+                collect_constant_universe(declaration.ty(), value, universes);
+            }
+        }
+        OutputGoal::Contains { path, value } | OutputGoal::NotContains { path, value } => {
+            if let Some(declaration) = model.path(path)
+                && let Type::Set(element) = declaration.ty()
+            {
+                collect_constant_universe(element, value, universes);
+            }
+        }
+        OutputGoal::Absent { .. } => {}
+    }
+}
+
+fn collect_goal_enum_universe(
+    model: &ConstraintModel,
+    goal: &OutputGoal,
+    universes: &mut Vec<(Type, Vec<VariantId>)>,
+) {
+    match goal {
+        OutputGoal::Equals { path, value } => {
+            if let Some(declaration) = model.path(path) {
+                collect_enum_constant(declaration.ty(), value, universes);
+            }
+        }
+        OutputGoal::Contains { path, value } | OutputGoal::NotContains { path, value } => {
+            if let Some(declaration) = model.path(path)
+                && let Type::Set(element) = declaration.ty()
+            {
+                collect_enum_constant(element, value, universes);
+            }
+        }
+        OutputGoal::Absent { .. } => {}
+    }
 }
 
 fn collect_enum_constant(ty: &Type, value: &Constant, universes: &mut Vec<(Type, Vec<VariantId>)>) {

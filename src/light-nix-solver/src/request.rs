@@ -11,6 +11,20 @@ pub enum OutputGoal {
     NotContains { path: OutputPath, value: Constant },
 }
 
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum OutputConstraint {
+    Required(OutputGoal),
+    Implies {
+        condition: OutputGoal,
+        consequence: OutputGoal,
+    },
+    Conflicts {
+        left: OutputGoal,
+        right: OutputGoal,
+    },
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ExcludedCandidate {
     pub variable_values: HashMap<VariableId, Constant>,
@@ -22,6 +36,7 @@ pub struct SolveRequest {
     variable_values: HashMap<VariableId, Constant>,
     output_values: HashMap<OutputPath, Option<Constant>>,
     goals: Vec<OutputGoal>,
+    constraints: Vec<OutputConstraint>,
     excluded_candidates: Vec<ExcludedCandidate>,
     timeout: Option<Duration>,
 }
@@ -61,6 +76,11 @@ impl SolveRequest {
         self
     }
 
+    pub fn add_constraint(&mut self, constraint: OutputConstraint) -> &mut Self {
+        self.constraints.push(constraint);
+        self
+    }
+
     pub fn exclude_candidate(
         &mut self,
         variable_values: HashMap<VariableId, Constant>,
@@ -88,6 +108,10 @@ impl SolveRequest {
 
     pub fn goals(&self) -> &[OutputGoal] {
         &self.goals
+    }
+
+    pub fn constraints(&self) -> &[OutputConstraint] {
+        &self.constraints
     }
 
     pub fn timeout(&self) -> Option<Duration> {

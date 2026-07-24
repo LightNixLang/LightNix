@@ -1,5 +1,5 @@
 use light_nix::{
-    AnalysisEnvironment, PlanOutcome, PlanningRequest, analyze_module,
+    AnalysisEnvironment, Goal, PlanOutcome, PlanningRequest, analyze_module,
     evaluator::{EvaluationInputs, RuntimeValue},
     ir::{Constant, VariableSource},
     name_resolver::ModuleId,
@@ -144,6 +144,61 @@ if n == 100 {
     assert_eq!(
         side_effects[0].after.as_ref().map(|entry| &entry.value),
         Some(&RuntimeValue::Bool(true))
+    );
+    assert!(plan.requires_confirmation());
+}
+
+#[test]
+fn catalog_conflict_disables_the_other_output_as_a_side_effect() {
+    let source = r#"
+type Audio {
+    pipewire: Bool
+    pulseaudio: Bool
+}
+let tunable(cost = 1) pipewire = false
+let tunable(cost = 1) pulseaudio = true
+declare let audio: Audio
+audio.pipewire = pipewire
+audio.pulseaudio = pulseaudio
+"#;
+    let arena = AstArena::new();
+    let analysis = analyze_module(source, &arena, ModuleId(0), &AnalysisEnvironment::default());
+    assert!(analysis.is_success());
+    let pipewire = analysis
+        .output_path("audio.pipewire")
+        .expect("pipewire output")
+        .clone();
+    let pulseaudio = analysis
+        .output_path("audio.pulseaudio")
+        .expect("pulseaudio output")
+        .clone();
+    let pipewire_enabled = Goal::Equals {
+        path: pipewire.clone(),
+        value: Constant::Bool(true),
+    };
+    let pulseaudio_enabled = Goal::Equals {
+        path: pulseaudio.clone(),
+        value: Constant::Bool(true),
+    };
+    let mut request = PlanningRequest::new();
+    request
+        .require(pipewire_enabled.clone())
+        .conflict(pipewire_enabled, pulseaudio_enabled);
+
+    let PlanOutcome::Applicable(plan) = analysis
+        .plan(&EvaluationInputs::default(), &request)
+        .unwrap()
+    else {
+        panic!("expected an applicable plan");
+    };
+    assert_eq!(plan.solution().cost, 2);
+    assert_eq!(plan.solution().variables.len(), 2);
+    let side_effects = plan.side_effects().collect::<Vec<_>>();
+    assert_eq!(side_effects.len(), 1);
+    assert_eq!(side_effects[0].path, pulseaudio);
+    assert_eq!(
+        side_effects[0].after.as_ref().map(|entry| &entry.value),
+        Some(&RuntimeValue::Bool(false))
     );
     assert!(plan.requires_confirmation());
 }

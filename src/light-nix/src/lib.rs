@@ -9,4 +9,6 @@ pub use light_nix_name_resolver as name_resolver;
 pub use light_nix_parser as parser;
 pub use light_nix_solver as solver;
 pub use light_nix_type_checker as type_checker;
-pub use planning::{ChangePlan, Goal, PlanError, PlanOutcome, PlanningRequest, plan_changes};
+pub use planning::{
+    ChangePlan, ExternalConstraint, Goal, PlanError, PlanOutcome, PlanningRequest, plan_changes,
+};

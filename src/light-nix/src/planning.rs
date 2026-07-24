@@ -10,7 +10,10 @@ use light_nix_evaluator::{
     RuntimeValue, evaluate_module,
 };
 use light_nix_ir::{Constant, OutputPath, VariableKind, VariableSource};
-use light_nix_solver::{Solution, SolveError, SolveOutcome, SolveRequest, UnknownReason, solve};
+use light_nix_solver::{
+    OutputConstraint, OutputGoal, Solution, SolveError, SolveOutcome, SolveRequest, UnknownReason,
+    solve,
+};
 
 use crate::ModuleAnalysis;
 
@@ -34,9 +37,20 @@ impl Goal {
     }
 }
 
+/// A catalog-provided invariant that is enforced without becoming part of the
+/// user's primary request.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum ExternalConstraint {
+    Required(Goal),
+    Implies { condition: Goal, consequence: Goal },
+    Conflicts { left: Goal, right: Goal },
+}
+
 #[derive(Debug, Clone)]
 pub struct PlanningRequest {
     goals: Vec<Goal>,
+    constraints: Vec<ExternalConstraint>,
     timeout: Option<Duration>,
     max_candidates: usize,
 }
@@ -45,6 +59,7 @@ impl Default for PlanningRequest {
     fn default() -> Self {
         Self {
             goals: Vec::new(),
+            constraints: Vec::new(),
             timeout: None,
             max_candidates: 32,
         }
@@ -77,6 +92,26 @@ impl PlanningRequest {
         self.require(Goal::NotContains { path, value })
     }
 
+    pub fn constrain(&mut self, constraint: ExternalConstraint) -> &mut Self {
+        self.constraints.push(constraint);
+        self
+    }
+
+    pub fn require_constraint(&mut self, predicate: Goal) -> &mut Self {
+        self.constrain(ExternalConstraint::Required(predicate))
+    }
+
+    pub fn imply(&mut self, condition: Goal, consequence: Goal) -> &mut Self {
+        self.constrain(ExternalConstraint::Implies {
+            condition,
+            consequence,
+        })
+    }
+
+    pub fn conflict(&mut self, left: Goal, right: Goal) -> &mut Self {
+        self.constrain(ExternalConstraint::Conflicts { left, right })
+    }
+
     pub fn set_timeout(&mut self, timeout: Duration) -> &mut Self {
         self.timeout = Some(timeout);
         self
@@ -89,6 +124,10 @@ impl PlanningRequest {
 
     pub fn goals(&self) -> &[Goal] {
         &self.goals
+    }
+
+    pub fn constraints(&self) -> &[ExternalConstraint] {
+        &self.constraints
     }
 
     pub fn timeout(&self) -> Option<Duration> {
@@ -252,7 +291,11 @@ pub fn plan_changes(
             && request
                 .goals
                 .iter()
-                .all(|goal| goal_is_satisfied(candidate.snapshot(), goal));
+                .all(|goal| goal_is_satisfied(candidate.snapshot(), goal))
+            && request
+                .constraints
+                .iter()
+                .all(|constraint| constraint_is_satisfied(candidate.snapshot(), constraint));
         if valid {
             let after = candidate.snapshot().clone();
             let output_changes = before.diff(&after);
@@ -317,22 +360,66 @@ fn build_solve_request(
         solve_request.set_output_value(declaration.path().clone(), value);
     }
     for goal in &request.goals {
-        match goal {
-            Goal::Equals { path, value } => {
-                solve_request.require_output(path.clone(), value.clone());
-            }
-            Goal::Absent { path } => {
-                solve_request.require_output_absent(path.clone());
-            }
-            Goal::Contains { path, value } => {
-                solve_request.require_output_contains(path.clone(), value.clone());
-            }
-            Goal::NotContains { path, value } => {
-                solve_request.require_output_not_contains(path.clone(), value.clone());
-            }
-        }
+        add_solver_goal(&mut solve_request, goal);
+    }
+    for constraint in &request.constraints {
+        solve_request.add_constraint(solver_constraint(constraint));
     }
     Ok(solve_request)
+}
+
+fn add_solver_goal(request: &mut SolveRequest, goal: &Goal) {
+    match goal {
+        Goal::Equals { path, value } => {
+            request.require_output(path.clone(), value.clone());
+        }
+        Goal::Absent { path } => {
+            request.require_output_absent(path.clone());
+        }
+        Goal::Contains { path, value } => {
+            request.require_output_contains(path.clone(), value.clone());
+        }
+        Goal::NotContains { path, value } => {
+            request.require_output_not_contains(path.clone(), value.clone());
+        }
+    }
+}
+
+fn solver_goal(goal: &Goal) -> OutputGoal {
+    match goal {
+        Goal::Equals { path, value } => OutputGoal::Equals {
+            path: path.clone(),
+            value: value.clone(),
+        },
+        Goal::Absent { path } => OutputGoal::Absent { path: path.clone() },
+        Goal::Contains { path, value } => OutputGoal::Contains {
+            path: path.clone(),
+            value: value.clone(),
+        },
+        Goal::NotContains { path, value } => OutputGoal::NotContains {
+            path: path.clone(),
+            value: value.clone(),
+        },
+    }
+}
+
+fn solver_constraint(constraint: &ExternalConstraint) -> OutputConstraint {
+    match constraint {
+        ExternalConstraint::Required(predicate) => {
+            OutputConstraint::Required(solver_goal(predicate))
+        }
+        ExternalConstraint::Implies {
+            condition,
+            consequence,
+        } => OutputConstraint::Implies {
+            condition: solver_goal(condition),
+            consequence: solver_goal(consequence),
+        },
+        ExternalConstraint::Conflicts { left, right } => OutputConstraint::Conflicts {
+            left: solver_goal(left),
+            right: solver_goal(right),
+        },
+    }
 }
 
 fn apply_solution(
@@ -398,6 +485,19 @@ fn goal_is_satisfied(snapshot: &EvaluationSnapshot, goal: &Goal) -> bool {
             };
             constant_to_runtime(value).is_ok_and(|value| !values.contains(&value))
         }),
+    }
+}
+
+fn constraint_is_satisfied(snapshot: &EvaluationSnapshot, constraint: &ExternalConstraint) -> bool {
+    match constraint {
+        ExternalConstraint::Required(predicate) => goal_is_satisfied(snapshot, predicate),
+        ExternalConstraint::Implies {
+            condition,
+            consequence,
+        } => !goal_is_satisfied(snapshot, condition) || goal_is_satisfied(snapshot, consequence),
+        ExternalConstraint::Conflicts { left, right } => {
+            !(goal_is_satisfied(snapshot, left) && goal_is_satisfied(snapshot, right))
+        }
     }
 }
 
