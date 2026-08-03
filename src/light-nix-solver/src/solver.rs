@@ -17,7 +17,7 @@ use z3::{
 
 use crate::{
     OpaqueImpact, OutputChange, OutputConstraint, OutputGoal, Solution, SolveError, SolveErrorKind,
-    SolveOutcome, SolveRequest, UnknownReason, VariableChange,
+    SolveOutcome, SolveRequest, UnknownReason, UnsatItem, VariableChange,
 };
 
 pub fn solve(model: &ConstraintModel, request: &SolveRequest) -> Result<SolveOutcome, SolveError> {
@@ -155,11 +155,18 @@ impl<'a> Encoder<'a> {
             let condition = self.expect_bool(condition)?;
             self.optimize.assert(condition);
         }
-        for goal in self.request.goals() {
-            self.encode_goal(goal)?;
+        let mut trackers = Vec::new();
+        for (index, goal) in self.request.goals().to_vec().iter().enumerate() {
+            let predicate = self.encode_output_predicate(goal)?;
+            let tracker = Bool::new_const(format!("lnx_track_goal_{index}"));
+            self.optimize.assert_and_track(&predicate, &tracker);
+            trackers.push((tracker, UnsatItem::Goal(index)));
         }
-        for constraint in self.request.constraints() {
-            self.encode_external_constraint(constraint)?;
+        for (index, constraint) in self.request.constraints().to_vec().iter().enumerate() {
+            let predicate = self.encode_external_constraint(constraint)?;
+            let tracker = Bool::new_const(format!("lnx_track_constraint_{index}"));
+            self.optimize.assert_and_track(&predicate, &tracker);
+            trackers.push((tracker, UnsatItem::Constraint(index)));
         }
         self.encode_exclusions()?;
 
@@ -190,7 +197,19 @@ impl<'a> Encoder<'a> {
         self.optimize.minimize(&total_distance);
 
         match self.optimize.check(&[]) {
-            SatResult::Unsat => Ok(SolveOutcome::Unsat),
+            SatResult::Unsat => {
+                let core = self.optimize.get_unsat_core();
+                let mut items = trackers
+                    .iter()
+                    .filter(|(tracker, _)| core.iter().any(|entry| entry == tracker))
+                    .map(|(_, item)| *item)
+                    .collect::<Vec<_>>();
+                items.sort_by_key(|item| match item {
+                    UnsatItem::Goal(index) => (0, *index),
+                    UnsatItem::Constraint(index) => (1, *index),
+                });
+                Ok(SolveOutcome::Unsat { core: items })
+            }
             SatResult::Unknown => Ok(SolveOutcome::Unknown(UnknownReason(
                 self.optimize
                     .get_reason_unknown()
@@ -206,16 +225,10 @@ impl<'a> Encoder<'a> {
         }
     }
 
-    fn encode_goal(&mut self, goal: &OutputGoal) -> Result<(), SolveError> {
-        let predicate = self.encode_output_predicate(goal)?;
-        self.optimize.assert(predicate);
-        Ok(())
-    }
-
     fn encode_external_constraint(
         &mut self,
         constraint: &OutputConstraint,
-    ) -> Result<(), SolveError> {
+    ) -> Result<Bool, SolveError> {
         let condition = match constraint {
             OutputConstraint::Required(predicate) => self.encode_output_predicate(predicate)?,
             OutputConstraint::Implies {
@@ -232,8 +245,7 @@ impl<'a> Encoder<'a> {
                 Bool::and(&[left, right]).not()
             }
         };
-        self.optimize.assert(condition);
-        Ok(())
+        Ok(condition)
     }
 
     fn encode_output_predicate(&mut self, goal: &OutputGoal) -> Result<Bool, SolveError> {

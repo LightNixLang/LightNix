@@ -12,7 +12,7 @@ use light_nix_evaluator::{
 use light_nix_ir::{Constant, OutputPath, VariableKind, VariableSource};
 use light_nix_solver::{
     OutputConstraint, OutputGoal, Solution, SolveError, SolveOutcome, SolveRequest, UnknownReason,
-    solve,
+    UnsatItem, solve,
 };
 
 use crate::ModuleAnalysis;
@@ -186,11 +186,25 @@ impl ChangePlan {
     }
 }
 
+/// A requirement that participates in the contradiction reported for an
+/// unsatisfiable request, in the caller's own vocabulary.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum UnsatCause {
+    Goal(Goal),
+    Constraint(ExternalConstraint),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum PlanOutcome {
     Applicable(ChangePlan),
-    Unsatisfiable { rejected_candidates: usize },
+    Unsatisfiable {
+        rejected_candidates: usize,
+        /// A mutually contradictory subset of the request (empty when the
+        /// contradiction could not be attributed to tracked requirements).
+        conflict: Vec<UnsatCause>,
+    },
     Unknown(UnknownReason),
 }
 
@@ -273,9 +287,23 @@ pub fn plan_changes(
         let outcome = solve(analysis.model(), &solve_request)?;
         let solution = match outcome {
             SolveOutcome::Sat(solution) => solution,
-            SolveOutcome::Unsat => {
+            SolveOutcome::Unsat { core } => {
+                let conflict = core
+                    .iter()
+                    .filter_map(|item| match item {
+                        UnsatItem::Goal(index) => {
+                            request.goals.get(*index).cloned().map(UnsatCause::Goal)
+                        }
+                        UnsatItem::Constraint(index) => request
+                            .constraints
+                            .get(*index)
+                            .cloned()
+                            .map(UnsatCause::Constraint),
+                    })
+                    .collect();
                 return Ok(PlanOutcome::Unsatisfiable {
                     rejected_candidates,
+                    conflict,
                 });
             }
             SolveOutcome::Unknown(reason) => return Ok(PlanOutcome::Unknown(reason)),

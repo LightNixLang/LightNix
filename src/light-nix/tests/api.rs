@@ -1,5 +1,5 @@
 use light_nix::{
-    AnalysisEnvironment, Goal, PlanOutcome, PlanningRequest, analyze_module,
+    AnalysisEnvironment, Goal, PlanOutcome, PlanningRequest, UnsatCause, analyze_module,
     evaluator::{EvaluationInputs, RuntimeValue},
     ir::{Constant, MutationPolicy, OutputPathSegment, VariableSource},
     name_resolver::ModuleId,
@@ -565,15 +565,20 @@ declare let fileSystems: AttrSet<FileSystemSettings>
         .output_path(r#"fileSystems["/"].device"#)
         .expect("device output");
 
+    let goal = Goal::Equals {
+        path: device,
+        value: Constant::String("/dev/sda1".to_owned()),
+    };
     let mut request = PlanningRequest::new();
-    request.require_output(device, Constant::String("/dev/sda1".to_owned()));
+    request.require(goal.clone());
     let outcome = analysis
         .plan(&EvaluationInputs::default(), &request)
         .unwrap();
     assert_eq!(
         outcome,
         PlanOutcome::Unsatisfiable {
-            rejected_candidates: 0
+            rejected_candidates: 0,
+            conflict: vec![UnsatCause::Goal(goal)],
         }
     );
 }

@@ -11,7 +11,7 @@ use light_nix_parser::{
     lexer::Lexer,
     parser::{ParseErrors, parse_source},
 };
-use light_nix_solver::{OutputGoal, SolveOutcome, SolveRequest, solve};
+use light_nix_solver::{OutputGoal, SolveOutcome, SolveRequest, UnsatItem, solve};
 use light_nix_type_checker::{BuiltinMethod, Type, TypeEnvironment, check_module};
 
 #[test]
@@ -326,7 +326,12 @@ fn reports_unsat_for_an_impossible_readonly_goal() {
             value: Constant::Bool(true),
         }]
     );
-    assert_eq!(solve(&model, &request).unwrap(), SolveOutcome::Unsat);
+    assert_eq!(
+        solve(&model, &request).unwrap(),
+        SolveOutcome::Unsat {
+            core: vec![UnsatItem::Goal(0)],
+        }
+    );
 }
 
 #[test]

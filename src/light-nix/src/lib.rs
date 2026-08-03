@@ -1,4 +1,5 @@
 mod analysis;
+pub mod catalog;
 mod planning;
 
 pub use analysis::{AnalysisEnvironment, ModuleAnalysis, analyze_module};
@@ -10,5 +11,6 @@ pub use light_nix_parser as parser;
 pub use light_nix_solver as solver;
 pub use light_nix_type_checker as type_checker;
 pub use planning::{
-    ChangePlan, ExternalConstraint, Goal, PlanError, PlanOutcome, PlanningRequest, plan_changes,
+    ChangePlan, ExternalConstraint, Goal, PlanError, PlanOutcome, PlanningRequest, UnsatCause,
+    plan_changes,
 };

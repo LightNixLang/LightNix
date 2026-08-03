@@ -35,10 +35,22 @@ pub struct Solution {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownReason(pub String);
 
+/// One requirement that participates in an unsatisfiable core, identified by
+/// its index in the [`SolveRequest`](crate::SolveRequest).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UnsatItem {
+    Goal(usize),
+    Constraint(usize),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum SolveOutcome {
     Sat(Solution),
-    Unsat,
+    /// No assignment satisfies the request.  `core` names a subset of the
+    /// request's goals and constraints that is already contradictory on its
+    /// own (empty when the contradiction lies outside tracked requirements,
+    /// e.g. in candidate exclusions).
+    Unsat { core: Vec<UnsatItem> },
     Unknown(UnknownReason),
 }
