@@ -411,7 +411,7 @@ let observedDevice = fileSystems["/"].device
         .clone();
     assert_eq!(
         analysis.output_path_segments(["fileSystems", "/", "device"]),
-        Some(&device)
+        Some(device.clone())
     );
     assert!(matches!(
         device.segments()[0],
@@ -461,6 +461,211 @@ let observedDevice = fileSystems["/"].device
         Some(&RuntimeValue::Bool(true))
     );
     assert!(plan.side_effects().next().is_none());
+}
+
+#[test]
+fn absent_tunable_options_are_inserted_as_virtual_claims() {
+    let source = r#"
+type Firefox {
+    tunable(cost = 5) enable: Bool
+}
+type Programs {
+    firefox: Firefox
+}
+declare let programs: Programs
+"#;
+    let arena = AstArena::new();
+    let analysis = analyze_module(source, &arena, ModuleId(0), &AnalysisEnvironment::default());
+    assert!(analysis.is_success());
+    let path = analysis
+        .output_path("programs.firefox.enable")
+        .expect("enable output");
+
+    let mut request = PlanningRequest::new();
+    request.require_output(path.clone(), Constant::Bool(true));
+    let PlanOutcome::Applicable(plan) = analysis
+        .plan(&EvaluationInputs::default(), &request)
+        .unwrap()
+    else {
+        panic!("expected an applicable plan");
+    };
+    assert_eq!(plan.solution().cost, 5);
+    assert!(plan.solution().variables.is_empty());
+    assert_eq!(plan.solution().outputs.len(), 1);
+    assert_eq!(plan.solution().outputs[0].before, None);
+    assert_eq!(
+        plan.solution().outputs[0].after,
+        Some(Constant::Bool(true))
+    );
+    assert!(plan.before().get(&path).is_none());
+    assert_eq!(
+        plan.after().get(&path).map(|entry| &entry.value),
+        Some(&RuntimeValue::Bool(true))
+    );
+    assert_eq!(plan.output_changes().len(), 1);
+    assert!(plan.side_effects().next().is_none());
+    assert!(!plan.requires_confirmation());
+}
+
+#[test]
+fn unwritten_attr_set_keys_are_planned_as_virtual_claims() {
+    let source = r#"
+type FileSystemSettings {
+    tunable(cost = 2) device: String
+    needed_for_boot: Bool
+}
+declare let fileSystems: AttrSet<FileSystemSettings>
+"#;
+    let arena = AstArena::new();
+    let analysis = analyze_module(source, &arena, ModuleId(0), &AnalysisEnvironment::default());
+    assert!(analysis.is_success());
+    let device = analysis
+        .output_path(r#"fileSystems["/boot"].device"#)
+        .expect("device output");
+    let sibling = analysis
+        .output_path(r#"fileSystems["/boot"].needed_for_boot"#)
+        .expect("sibling output");
+    assert!(analysis.model().path(&device).is_none());
+
+    let mut request = PlanningRequest::new();
+    request.require_output(
+        device.clone(),
+        Constant::String("/dev/disk/by-label/boot".to_owned()),
+    );
+    let PlanOutcome::Applicable(plan) = analysis
+        .plan(&EvaluationInputs::default(), &request)
+        .unwrap()
+    else {
+        panic!("expected an applicable plan");
+    };
+    assert_eq!(plan.solution().cost, 2);
+    assert_eq!(plan.solution().outputs.len(), 1);
+    assert_eq!(plan.solution().outputs[0].before, None);
+    assert_eq!(
+        plan.after().get(&device).map(|entry| &entry.value),
+        Some(&RuntimeValue::String("/dev/disk/by-label/boot".to_owned()))
+    );
+    assert!(plan.after().get(&sibling).is_none());
+    assert!(plan.side_effects().next().is_none());
+    assert!(!plan.requires_confirmation());
+}
+
+#[test]
+fn virtual_claims_respect_readonly_schema_ownership() {
+    let source = r#"
+type FileSystemSettings {
+    device: String
+}
+declare let fileSystems: AttrSet<FileSystemSettings>
+"#;
+    let arena = AstArena::new();
+    let analysis = analyze_module(source, &arena, ModuleId(0), &AnalysisEnvironment::default());
+    assert!(analysis.is_success());
+    let device = analysis
+        .output_path(r#"fileSystems["/"].device"#)
+        .expect("device output");
+
+    let mut request = PlanningRequest::new();
+    request.require_output(device, Constant::String("/dev/sda1".to_owned()));
+    let outcome = analysis
+        .plan(&EvaluationInputs::default(), &request)
+        .unwrap();
+    assert_eq!(
+        outcome,
+        PlanOutcome::Unsatisfiable {
+            rejected_candidates: 0
+        }
+    );
+}
+
+#[test]
+fn requiring_absence_of_an_unwritten_option_needs_no_edit() {
+    let source = r#"
+type Firefox {
+    tunable(cost = 5) enable: Bool
+}
+type Programs {
+    firefox: Firefox
+}
+declare let programs: Programs
+"#;
+    let arena = AstArena::new();
+    let analysis = analyze_module(source, &arena, ModuleId(0), &AnalysisEnvironment::default());
+    assert!(analysis.is_success());
+    let path = analysis
+        .output_path("programs.firefox.enable")
+        .expect("enable output");
+
+    let mut request = PlanningRequest::new();
+    request.require_output_absent(path);
+    let PlanOutcome::Applicable(plan) = analysis
+        .plan(&EvaluationInputs::default(), &request)
+        .unwrap()
+    else {
+        panic!("expected an applicable plan");
+    };
+    assert_eq!(plan.solution().cost, 0);
+    assert!(plan.solution().variables.is_empty());
+    assert!(plan.solution().outputs.is_empty());
+    assert!(plan.output_changes().is_empty());
+}
+
+#[test]
+fn virtual_claims_inherit_policies_across_module_imports() {
+    let schema_source = r#"
+export type Firefox {
+    tunable(cost = 3) enable: Bool
+}
+export type Programs {
+    firefox: Firefox
+}
+export declare let programs: Programs
+"#;
+    let schema_arena = AstArena::new();
+    let schema = analyze_module(
+        schema_source,
+        &schema_arena,
+        ModuleId(1),
+        &AnalysisEnvironment::default(),
+    );
+    assert!(schema.is_success());
+
+    let mut environment = AnalysisEnvironment::default();
+    environment.register_module("@lnix/nixos", &schema);
+    let source = r#"
+import { programs } from "@lnix/nixos"
+"#;
+    let arena = AstArena::new();
+    let analysis = analyze_module(source, &arena, ModuleId(2), &environment);
+    assert!(
+        analysis.is_success(),
+        "parse={:?}\nname={:?}\ntype={:?}\ndependency={:?}\nlower={:?}",
+        analysis.parse_errors(),
+        analysis.name_errors(),
+        analysis.type_errors(),
+        analysis.dependency_errors(),
+        analysis.lower_errors(),
+    );
+    let path = analysis
+        .output_path("programs.firefox.enable")
+        .expect("imported output path");
+    assert!(analysis.model().path(&path).is_none());
+
+    let mut request = PlanningRequest::new();
+    request.require_output(path.clone(), Constant::Bool(true));
+    let PlanOutcome::Applicable(plan) = analysis
+        .plan(&EvaluationInputs::default(), &request)
+        .unwrap()
+    else {
+        panic!("expected an applicable plan");
+    };
+    assert_eq!(plan.solution().cost, 3);
+    assert_eq!(plan.solution().outputs.len(), 1);
+    assert_eq!(plan.solution().outputs[0].before, None);
+    assert_eq!(
+        plan.after().get(&path).map(|entry| &entry.value),
+        Some(&RuntimeValue::Bool(true))
+    );
 }
 
 #[test]

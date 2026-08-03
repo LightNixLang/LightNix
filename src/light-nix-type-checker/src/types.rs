@@ -5,6 +5,17 @@ use light_nix_name_resolver::{GenericParameterId, TypeDefId};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TypeVariableId(pub u32);
 
+/// Who may rewrite a schema option or binding: nobody but the human author
+/// (`Readonly`, the default), or the solver at the given soft-penalty cost
+/// (`Tunable`).  Policies are schema metadata, so they live with the types
+/// and travel across module imports together with them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum MutationPolicy {
+    Readonly,
+    Tunable { cost: u64 },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Type {
     Error,

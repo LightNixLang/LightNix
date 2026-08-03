@@ -6,7 +6,7 @@ mod result;
 mod solver;
 
 pub use error::{SolveError, SolveErrorKind};
-pub use request::{OutputConstraint, OutputGoal, SolveRequest};
+pub use request::{OutputConstraint, OutputGoal, SolveRequest, VirtualOutput};
 pub use result::{
     OpaqueImpact, OutputChange, Solution, SolveOutcome, UnknownReason, VariableChange,
 };

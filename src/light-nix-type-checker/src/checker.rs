@@ -11,20 +11,22 @@ use light_nix_parser::ast::{
     AST, AccessOperator, Array, AssignValue, BinaryOperator, ClosureBody, ClosureExpression,
     CollectionKind, ElseBranchValue, ExplicitTypeArgument, ExplicitTypeArguments, Expression,
     FunctionCall, FunctionDefine, GenericParameters, ImplementsDefine, InterfaceDefine,
-    LetStatement, NestedAssignment, Pattern, Primary, PrimaryAccess, Source, Statement, Statements,
-    TypeDefine, TypeInfo, TypeOperator, TypedefBlock, TypedefValue, UnaryOperator, Value,
-    WhereClause,
+    LetStatement, MutationPolicyKind, NestedAssignment, Pattern, Primary, PrimaryAccess, Source,
+    Statement, Statements, TypeDefine, TypeInfo, TypeOperator, TypedefBlock, TypedefValue,
+    UnaryOperator, Value, WhereClause,
 };
 
 use crate::{
-    BuiltinMethod, InterfaceBound, Type, TypeCheckError, TypeCheckErrorKind, TypeScheme,
-    builtin::find_builtin_method, unify::Unifier,
+    BuiltinMethod, InterfaceBound, MutationPolicy, Type, TypeCheckError, TypeCheckErrorKind,
+    TypeScheme, builtin::find_builtin_method, unify::Unifier,
 };
 
 #[derive(Debug, Clone, Default)]
 pub struct TypeEnvironment {
     symbols: HashMap<SymbolId, TypeScheme>,
+    symbol_policies: HashMap<SymbolId, MutationPolicy>,
     fields: HashMap<FieldId, Type>,
+    field_policies: HashMap<FieldId, MutationPolicy>,
     field_lookup: HashMap<(TypeDefId, String), FieldId>,
     generic_arities: HashMap<TypeDefId, usize>,
     type_parameters: HashMap<TypeDefId, Vec<GenericParameterId>>,
@@ -37,7 +39,9 @@ pub struct TypeEnvironment {
 impl TypeEnvironment {
     pub fn extend(&mut self, other: &Self) {
         self.symbols.extend(other.symbols.clone());
+        self.symbol_policies.extend(other.symbol_policies.clone());
         self.fields.extend(other.fields.clone());
+        self.field_policies.extend(other.field_policies.clone());
         self.field_lookup.extend(other.field_lookup.clone());
         self.generic_arities.extend(other.generic_arities.clone());
         self.type_parameters.extend(other.type_parameters.clone());
@@ -115,7 +119,9 @@ pub struct TypeCheckResult<'ast> {
     type_info_types: HashMap<AstId<'ast>, Type>,
     member_resolutions: HashMap<AstId<'ast>, MemberResolution>,
     symbol_types: HashMap<SymbolId, TypeScheme>,
+    symbol_policies: HashMap<SymbolId, MutationPolicy>,
     field_types: HashMap<FieldId, Type>,
+    field_policies: HashMap<FieldId, MutationPolicy>,
     field_lookup: HashMap<(TypeDefId, String), FieldId>,
     type_arities: HashMap<TypeDefId, usize>,
     type_parameters: HashMap<TypeDefId, Vec<GenericParameterId>>,
@@ -178,15 +184,36 @@ impl<'ast> TypeCheckResult<'ast> {
         self.symbol_types.get(&symbol)
     }
 
+    /// The mutation policy written on a valueless (declaration-style) let.
+    pub fn symbol_policy(&self, symbol: SymbolId) -> Option<MutationPolicy> {
+        self.symbol_policies.get(&symbol).copied()
+    }
+
     pub fn field_type(&self, field: FieldId) -> Option<&Type> {
         self.field_types.get(&field)
     }
 
+    /// The mutation policy written on a schema field, if any.  Fields without
+    /// an explicit policy inherit from their enclosing declaration.
+    pub fn field_policy(&self, field: FieldId) -> Option<MutationPolicy> {
+        self.field_policies.get(&field).copied()
+    }
+
     pub fn named_field(&self, receiver: &Type, name: &str) -> Option<(FieldId, Type)> {
-        let Type::Named(owner, arguments) = receiver else {
+        let Type::Named(owner, _) = receiver else {
             return None;
         };
         let field = *self.field_lookup.get(&(*owner, name.to_owned()))?;
+        let field_type = self.field_type_in(receiver, field)?;
+        Some((field, field_type))
+    }
+
+    /// The type of a known field as seen through a concrete receiver type,
+    /// with the receiver's generic arguments substituted in.
+    pub fn field_type_in(&self, receiver: &Type, field: FieldId) -> Option<Type> {
+        let Type::Named(owner, arguments) = receiver else {
+            return None;
+        };
         let field_type = self.field_types.get(&field)?;
         let substitutions = self
             .type_parameters
@@ -196,7 +223,7 @@ impl<'ast> TypeCheckResult<'ast> {
             .copied()
             .zip(arguments.iter().cloned())
             .collect();
-        Some((field, substitute(field_type, &substitutions)))
+        Some(substitute(field_type, &substitutions))
     }
 
     pub fn type_parameters(&self, ty: TypeDefId) -> &[GenericParameterId] {
@@ -206,7 +233,9 @@ impl<'ast> TypeCheckResult<'ast> {
     pub fn type_environment(&self) -> TypeEnvironment {
         TypeEnvironment {
             symbols: self.symbol_types.clone(),
+            symbol_policies: self.symbol_policies.clone(),
             fields: self.field_types.clone(),
+            field_policies: self.field_policies.clone(),
             field_lookup: self.field_lookup.clone(),
             generic_arities: self.type_arities.clone(),
             type_parameters: self.type_parameters.clone(),
@@ -300,7 +329,9 @@ struct Checker<'ast, 'input, 'allocator, 'context, 'environment> {
     type_info_types: HashMap<AstId<'ast>, Type>,
     member_resolutions: HashMap<AstId<'ast>, MemberResolution>,
     symbol_types: HashMap<SymbolId, TypeScheme>,
+    symbol_policies: HashMap<SymbolId, MutationPolicy>,
     field_types: HashMap<FieldId, Type>,
+    field_policies: HashMap<FieldId, MutationPolicy>,
     field_lookup: HashMap<(TypeDefId, String), FieldId>,
     type_arities: HashMap<TypeDefId, usize>,
     type_parameters: HashMap<TypeDefId, Vec<GenericParameterId>>,
@@ -325,16 +356,20 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
         environment: &'environment TypeEnvironment,
     ) -> Self {
         let mut symbol_types = environment.symbols.clone();
+        let mut symbol_policies = environment.symbol_policies.clone();
         let mut field_types = environment.fields.clone();
+        let mut field_policies = environment.field_policies.clone();
         let mut type_arities = environment.generic_arities.clone();
         let type_parameters = environment.type_parameters.clone();
         let type_bounds = environment.type_bounds.clone();
         let mut interface_types = environment.interfaces.clone();
         for symbol in resolution.symbols() {
             symbol_types.remove(&symbol.id);
+            symbol_policies.remove(&symbol.id);
         }
         for field in resolution.fields() {
             field_types.remove(&field.id);
+            field_policies.remove(&field.id);
         }
         for ty in resolution.types() {
             type_arities.entry(ty.id).or_insert(0);
@@ -353,7 +388,9 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
             type_info_types: HashMap::new(),
             member_resolutions: HashMap::new(),
             symbol_types,
+            symbol_policies,
             field_types,
+            field_policies,
             field_lookup: environment.field_lookup.clone(),
             type_arities,
             type_parameters,
@@ -431,7 +468,9 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
             type_info_types: self.type_info_types,
             member_resolutions: self.member_resolutions,
             symbol_types: self.symbol_types,
+            symbol_policies: self.symbol_policies,
             field_types: self.field_types,
+            field_policies: self.field_policies,
             field_lookup: self.field_lookup,
             type_arities: self.type_arities,
             type_parameters: self.type_parameters,
@@ -546,6 +585,10 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
                 }
             };
             self.field_types.insert(field_id, ty);
+            if let Some(policy) = field.policy.as_ref() {
+                self.field_policies
+                    .insert(field_id, mutation_policy(&policy.kind));
+            }
             self.field_lookup
                 .insert((owner, field.name.value.to_owned()), field_id);
         }
@@ -819,6 +862,15 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
             .unwrap_or_else(|| self.unifier.fresh());
         self.symbol_types
             .insert(symbol, TypeScheme::monomorphic(ty));
+        if node.value.is_none() {
+            let policy = node
+                .policy
+                .as_ref()
+                .map_or(MutationPolicy::Readonly, |policy| {
+                    mutation_policy(&policy.kind)
+                });
+            self.symbol_policies.insert(symbol, policy);
+        }
     }
 
     fn predeclare_function(&mut self, node: &'ast FunctionDefine<'input, 'allocator>) {
@@ -2523,6 +2575,15 @@ fn named_type_id(ty: &Type) -> Option<TypeDefId> {
     match ty {
         Type::Named(id, _) => Some(*id),
         _ => None,
+    }
+}
+
+fn mutation_policy(policy: &MutationPolicyKind) -> MutationPolicy {
+    match policy {
+        MutationPolicyKind::Readonly => MutationPolicy::Readonly,
+        MutationPolicyKind::Tunable { cost } => MutationPolicy::Tunable {
+            cost: cost.as_ref().map_or(1, |cost| cost.value),
+        },
     }
 }
 

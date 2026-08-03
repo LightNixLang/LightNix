@@ -1,7 +1,10 @@
 use light_nix_dependency_graph::{
     DependencyGraph, DependencyGraphError, build_dependency_graph, refine_dependency_graph,
 };
-use light_nix_ir::{ConstraintModel, LowerError, LowerResult, OutputPath, lower_module};
+use light_nix_ir::{
+    ConstraintModel, LowerError, LowerResult, MutationPolicy, OutputPath, OutputPathSegment,
+    lower_module,
+};
 use light_nix_name_resolver::{
     ImportEnvironment, ModuleId, ModuleInterface, NameResolution, Namespace, Res, collect_module,
 };
@@ -114,8 +117,10 @@ impl<'input, 'allocator> ModuleAnalysis<'input, 'allocator> {
     }
 
     /// Resolves a catalog-style dotted output name such as
-    /// `programs.firefox.enable` to the stable IDs used by the IR.
-    pub fn output_path(&self, path: &str) -> Option<&OutputPath> {
+    /// `programs.firefox.enable` to the stable IDs used by the IR.  The path
+    /// only has to be valid against the schema: it does not need a claim in
+    /// the analysed source, so absent options resolve too.
+    pub fn output_path(&self, path: &str) -> Option<OutputPath> {
         let segments = parse_output_path(path)?;
         self.output_path_segments(segments.iter().map(String::as_str))
     }
@@ -123,7 +128,7 @@ impl<'input, 'allocator> ModuleAnalysis<'input, 'allocator> {
     pub fn output_path_segments<'name>(
         &self,
         segments: impl IntoIterator<Item = &'name str>,
-    ) -> Option<&OutputPath> {
+    ) -> Option<OutputPath> {
         let mut segments = segments.into_iter();
         let root_name = segments.next()?;
         let Res::Symbol(root) = self
@@ -150,10 +155,36 @@ impl<'input, 'allocator> ModuleAnalysis<'input, 'allocator> {
                 }
             }
         }
-        self.lowered
-            .model()
-            .path(&output)
-            .map(|declaration| declaration.path())
+        Some(output)
+    }
+
+    /// The declared type and mutation policy of an output path.  Paths with a
+    /// claim in the source are answered from the lowered model; absent paths
+    /// (virtual claims, e.g. keys of an `AttrSet` option that is never
+    /// written) are answered by walking the schema, inheriting policies the
+    /// same way lowering does.
+    pub fn output_declaration(&self, path: &OutputPath) -> Option<(Type, MutationPolicy)> {
+        if let Some(declaration) = self.lowered.model().path(path) {
+            return Some((declaration.ty().clone(), declaration.policy()));
+        }
+        let root = path.root_symbol();
+        let mut policy = self.types.symbol_policy(root)?;
+        let mut receiver = self.types.symbol_type(root)?.ty.clone();
+        for segment in path.segments() {
+            match segment {
+                OutputPathSegment::Field(field) => {
+                    receiver = self.types.field_type_in(&receiver, *field)?;
+                    policy = self.types.field_policy(*field).unwrap_or(policy);
+                }
+                OutputPathSegment::Key(_) => {
+                    let Type::AttrSet(element) = receiver else {
+                        return None;
+                    };
+                    receiver = *element;
+                }
+            }
+        }
+        Some((receiver, policy))
     }
 
     pub fn name_errors(&self) -> &[light_nix_name_resolver::error::NameResolveError] {

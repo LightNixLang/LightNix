@@ -199,6 +199,7 @@ pub enum PlanOutcome {
 pub enum PlanError {
     AnalysisFailed,
     EmptyRequest,
+    UnknownOutputPath(OutputPath),
     BaselineEvaluation(Vec<EvaluationError>),
     Solve(SolveError),
     UnsupportedRuntimeValue,
@@ -359,6 +360,15 @@ fn build_solve_request(
             .transpose()?;
         solve_request.set_output_value(declaration.path().clone(), value);
     }
+    for path in predicate_paths(request) {
+        if analysis.model().path(path).is_some() {
+            continue;
+        }
+        let (ty, policy) = analysis
+            .output_declaration(path)
+            .ok_or_else(|| PlanError::UnknownOutputPath(path.clone()))?;
+        solve_request.declare_virtual_output(path.clone(), ty, policy);
+    }
     for goal in &request.goals {
         add_solver_goal(&mut solve_request, goal);
     }
@@ -366,6 +376,26 @@ fn build_solve_request(
         solve_request.add_constraint(solver_constraint(constraint));
     }
     Ok(solve_request)
+}
+
+/// Every output path mentioned by the request's goals or catalog constraints.
+fn predicate_paths(request: &PlanningRequest) -> impl Iterator<Item = &OutputPath> {
+    let constraint_goals = request.constraints.iter().flat_map(|constraint| {
+        let (first, second) = match constraint {
+            ExternalConstraint::Required(predicate) => (predicate, None),
+            ExternalConstraint::Implies {
+                condition,
+                consequence,
+            } => (condition, Some(consequence)),
+            ExternalConstraint::Conflicts { left, right } => (left, Some(right)),
+        };
+        std::iter::once(first).chain(second)
+    });
+    request
+        .goals
+        .iter()
+        .chain(constraint_goals)
+        .map(Goal::path)
 }
 
 fn add_solver_goal(request: &mut SolveRequest, goal: &Goal) {
@@ -436,11 +466,12 @@ fn apply_solution(
         }
     }
     for change in &solution.outputs {
+        // Virtual claims (paths with no row in the source) have no origin;
+        // the write-back layer later turns them into insertions.
         let origin = analysis
             .model()
             .path(&change.path)
-            .map(|declaration| declaration.origin().clone())
-            .expect("solver only returns declared output paths");
+            .map(|declaration| declaration.origin().clone());
         candidate.override_output(
             change.path.clone(),
             change.after.as_ref().map(constant_to_runtime).transpose()?,

@@ -10,7 +10,9 @@ pub struct OutputEntry {
     pub value: RuntimeValue,
     pub dependencies: BTreeSet<SymbolId>,
     pub opaque_dependencies: BTreeSet<SymbolId>,
-    pub origin: SourceOrigin,
+    /// Where the claim producing this value lives in the source, or `None`
+    /// for a machine-injected virtual claim that has no source row yet.
+    pub origin: Option<SourceOrigin>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use light_nix_name_resolver::{
-    Declaration, FieldId, GenericParameterId, ModuleId, NameResolution, Res, SymbolId, TypeDefId,
+    Declaration, GenericParameterId, ModuleId, NameResolution, Res, SymbolId, TypeDefId,
     TypeDefKind,
 };
+#[cfg(test)]
+use light_nix_name_resolver::FieldId;
 use light_nix_parser::ast::{
     AST, AccessOperator, AssignValue, BinaryOperator, Block, ClosureBody, ClosureExpression,
     CollectionKind, ElseBranchValue, Expression, FunctionAttribute, LetStatement, Literal,
@@ -67,7 +69,6 @@ struct Lowerer<'ast, 'input, 'allocator, 'context> {
     lowered_symbols: HashMap<SymbolId, ExpressionId>,
     lowering_symbols: HashSet<SymbolId>,
     frames: Vec<HashMap<SymbolId, ExpressionId>>,
-    field_policies: HashMap<FieldId, MutationPolicy>,
     errors: Vec<LowerError>,
     true_expression: Option<ExpressionId>,
 }
@@ -88,7 +89,6 @@ impl<'ast, 'input, 'allocator, 'context> Lowerer<'ast, 'input, 'allocator, 'cont
             lowered_symbols: HashMap::new(),
             lowering_symbols: HashSet::new(),
             frames: Vec::new(),
-            field_policies: HashMap::new(),
             errors: Vec::new(),
             true_expression: None,
         }
@@ -116,26 +116,7 @@ impl<'ast, 'input, 'allocator, 'context> Lowerer<'ast, 'input, 'allocator, 'cont
                         self.top_level_lets.insert(symbol, node);
                     }
                 }
-                Statement::TypeDefine(node) => self.collect_field_policies(node.body),
                 _ => {}
-            }
-        }
-    }
-
-    fn collect_field_policies(
-        &mut self,
-        block: &'ast light_nix_parser::ast::TypedefBlock<'input, 'allocator>,
-    ) {
-        for field in block.fields {
-            if let Some(Declaration::Field(id)) =
-                self.resolution.declaration_of_literal(&field.name)
-                && let Some(policy) = field.policy.as_ref()
-            {
-                self.field_policies
-                    .insert(id, mutation_policy(&policy.kind));
-            }
-            if let light_nix_parser::ast::TypedefValue::Block(nested) = field.value {
-                self.collect_field_policies(nested);
             }
         }
     }
@@ -276,9 +257,8 @@ impl<'ast, 'input, 'allocator, 'context> Lowerer<'ast, 'input, 'allocator, 'cont
                 .map(|ty| substitute_type(ty, &substitutions))
                 .unwrap_or(Type::Error);
             let policy = self
-                .field_policies
-                .get(&field_id)
-                .copied()
+                .types
+                .field_policy(field_id)
                 .unwrap_or(inherited_policy);
             let path = root.clone().field(field_id);
             let child = match &ty {
@@ -475,11 +455,7 @@ impl<'ast, 'input, 'allocator, 'context> Lowerer<'ast, 'input, 'allocator, 'cont
                         self.error(LowerErrorKind::MissingType, field.name.span.clone());
                         continue;
                     };
-                    let field_policy = self
-                        .field_policies
-                        .get(&field_id)
-                        .copied()
-                        .unwrap_or(policy);
+                    let field_policy = self.types.field_policy(field_id).unwrap_or(policy);
                     self.lower_assign_value(
                         path.clone().field(field_id),
                         field_type,
@@ -1398,8 +1374,8 @@ impl<'ast, 'input, 'allocator, 'context> Lowerer<'ast, 'input, 'allocator, 'cont
             match self.types.member_resolution(access) {
                 Some(MemberResolution::Field(field)) => {
                     path = path.field(*field);
-                    if let Some(field_policy) = self.field_policies.get(field) {
-                        policy = *field_policy;
+                    if let Some(field_policy) = self.types.field_policy(*field) {
+                        policy = field_policy;
                     }
                 }
                 Some(MemberResolution::AttrSetKey) => {

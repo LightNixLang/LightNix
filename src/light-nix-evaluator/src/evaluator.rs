@@ -32,11 +32,14 @@ impl EvaluationInputs {
         self.tunable_overrides.insert(symbol, value);
     }
 
+    /// Overrides an output claim.  `origin` is the source claim being
+    /// overridden, or `None` for a virtual claim that has no source location
+    /// yet (a machine-proposed insertion).
     pub fn override_output(
         &mut self,
         path: OutputPath,
         value: Option<RuntimeValue>,
-        origin: SourceOrigin,
+        origin: Option<SourceOrigin>,
     ) {
         self.output_overrides
             .insert(path, OutputOverride { value, origin });
@@ -46,7 +49,7 @@ impl EvaluationInputs {
 #[derive(Debug, Clone)]
 struct OutputOverride {
     value: Option<RuntimeValue>,
-    origin: SourceOrigin,
+    origin: Option<SourceOrigin>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -397,10 +400,10 @@ impl<'ast, 'input, 'allocator, 'context, 'inputs>
                     value: value.value.clone(),
                     dependencies: value.dependencies.clone(),
                     opaque_dependencies: value.opaque_dependencies.clone(),
-                    origin: SourceOrigin {
+                    origin: Some(SourceOrigin {
                         module: self.module,
                         span: span.clone(),
-                    },
+                    }),
                 };
                 if self.snapshot.contains(&path) {
                     return self.fail(EvaluationErrorKind::DuplicateAssignment { path }, span);
@@ -1908,7 +1911,14 @@ if n == 100 {
             (&firefox_output.value, &firefox_output.dependencies),
             (&RuntimeValue::Bool(true), &expected_dependencies)
         );
-        assert_eq!(firefox_output.origin.module, ModuleId(0));
+        assert_eq!(
+            firefox_output
+                .origin
+                .as_ref()
+                .expect("assigned outputs carry a source origin")
+                .module,
+            ModuleId(0)
+        );
         assert_eq!(
             after
                 .snapshot()

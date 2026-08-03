@@ -239,31 +239,25 @@ impl<'a> Encoder<'a> {
     fn encode_output_predicate(&mut self, goal: &OutputGoal) -> Result<Bool, SolveError> {
         Ok(match goal {
             OutputGoal::Equals { path, value } => {
-                let declaration = self
-                    .source
-                    .path(path)
-                    .ok_or_else(|| error(SolveErrorKind::UnknownOutput(path.clone())))?;
+                let (output_type, _) = self.output_info(path)?;
                 let output = self.encode_output(path)?;
-                let expected = self.encode_constant(declaration.ty(), value)?;
+                let expected = self.encode_constant(&output_type, value)?;
                 Bool::and(&[
                     output.actual_present,
                     self.value_eq(&output.actual_value, &expected)?,
                 ])
             }
             OutputGoal::Absent { path } => {
-                if self.source.path(path).is_none() {
-                    return Err(error(SolveErrorKind::UnknownOutput(path.clone())));
-                }
+                self.output_info(path)?;
                 let output = self.encode_output(path)?;
                 output.actual_present.not()
             }
             OutputGoal::Contains { path, value } | OutputGoal::NotContains { path, value } => {
-                let declaration = self
-                    .source
-                    .path(path)
-                    .ok_or_else(|| error(SolveErrorKind::UnknownOutput(path.clone())))?;
-                let element_type = match declaration.ty() {
-                    Type::List(element_type) | Type::Set(element_type) => element_type,
+                let (output_type, _) = self.output_info(path)?;
+                let element_type = match &output_type {
+                    Type::List(element_type) | Type::Set(element_type) => {
+                        element_type.as_ref().clone()
+                    }
                     found => {
                         return Err(
                             self.type_error(&Type::Set(Box::new(Type::Error)), found.clone())
@@ -271,7 +265,8 @@ impl<'a> Encoder<'a> {
                     }
                 };
                 let output = self.encode_output(path)?;
-                let member = self.collection_contains(&output.actual_value, element_type, value)?;
+                let member =
+                    self.collection_contains(&output.actual_value, &element_type, value)?;
                 if matches!(goal, OutputGoal::Contains { .. }) {
                     Bool::and(&[output.actual_present, member])
                 } else {
@@ -294,14 +289,11 @@ impl<'a> Encoder<'a> {
                 differences.push(self.value_eq(&actual, &excluded)?.not());
             }
             for (path, value) in &exclusion.output_values {
-                let declaration = self
-                    .source
-                    .path(path)
-                    .ok_or_else(|| error(SolveErrorKind::UnknownOutput(path.clone())))?;
+                let (output_type, _) = self.output_info(path)?;
                 let output = self.encode_output(path)?;
                 match value {
                     Some(value) => {
-                        let excluded = self.encode_constant(declaration.ty(), value)?;
+                        let excluded = self.encode_constant(&output_type, value)?;
                         let same = Bool::and(&[
                             output.actual_present,
                             self.value_eq(&output.actual_value, &excluded)?,
@@ -614,6 +606,18 @@ impl<'a> Encoder<'a> {
         Ok(value)
     }
 
+    /// The declared type and mutation policy of an output path, answered from
+    /// the lowered model or, for virtual claims, from the request.
+    fn output_info(&self, path: &OutputPath) -> Result<(Type, MutationPolicy), SolveError> {
+        if let Some(declaration) = self.source.path(path) {
+            return Ok((declaration.ty().clone(), declaration.policy()));
+        }
+        if let Some(virtual_output) = self.request.virtual_outputs().get(path) {
+            return Ok((virtual_output.ty.clone(), virtual_output.policy));
+        }
+        Err(error(SolveErrorKind::UnknownOutput(path.clone())))
+    }
+
     fn encode_output(&mut self, path: &OutputPath) -> Result<OutputState, SolveError> {
         if let Some(output) = self.outputs.get(path) {
             return Ok(output.clone());
@@ -621,10 +625,7 @@ impl<'a> Encoder<'a> {
         if !self.visiting_outputs.insert(path.clone()) {
             return Err(error(SolveErrorKind::CyclicOutput(path.clone())));
         }
-        let declaration = self
-            .source
-            .path(path)
-            .ok_or_else(|| error(SolveErrorKind::UnknownOutput(path.clone())))?;
+        let (output_type, policy) = self.output_info(path)?;
         let definition = self.source.output(path);
 
         let (derived_present, derived_value) = if let Some(definition) = definition {
@@ -646,7 +647,7 @@ impl<'a> Encoder<'a> {
             } else {
                 Bool::or(&guards)
             };
-            let mut value = self.default_value(declaration.ty())?;
+            let mut value = self.default_value(&output_type)?;
             for (guard, candidate) in guards.iter().zip(values.iter()).rev() {
                 value = self.value_ite(guard, candidate, &value)?;
             }
@@ -655,21 +656,15 @@ impl<'a> Encoder<'a> {
             match current {
                 Some(value) => (
                     Bool::from_bool(true),
-                    self.encode_constant(declaration.ty(), value)?,
+                    self.encode_constant(&output_type, value)?,
                 ),
-                None => (
-                    Bool::from_bool(false),
-                    self.default_value(declaration.ty())?,
-                ),
+                None => (Bool::from_bool(false), self.default_value(&output_type)?),
             }
         } else {
-            (
-                Bool::from_bool(false),
-                self.default_value(declaration.ty())?,
-            )
+            (Bool::from_bool(false), self.default_value(&output_type)?)
         };
 
-        let state = match declaration.policy() {
+        let state = match policy {
             MutationPolicy::Readonly => OutputState {
                 derived_present: derived_present.clone(),
                 derived_value: derived_value.clone(),
@@ -682,7 +677,7 @@ impl<'a> Encoder<'a> {
                 let edit = Bool::new_const(output_name(path, "edit"));
                 let candidate_present = Bool::new_const(output_name(path, "present"));
                 let candidate_value =
-                    self.fresh_value(declaration.ty(), &output_name(path, "candidate"))?;
+                    self.fresh_value(&output_type, &output_name(path, "candidate"))?;
                 let presence_changed = candidate_present.eq(&derived_present).not();
                 let both_present = Bool::and(&[candidate_present.clone(), derived_present.clone()]);
                 let value_changed = self.value_eq(&candidate_value, &derived_value)?.not();
@@ -699,9 +694,7 @@ impl<'a> Encoder<'a> {
                 }
             }
             _ => {
-                return Err(error(SolveErrorKind::UnsupportedType(
-                    declaration.ty().clone(),
-                )));
+                return Err(error(SolveErrorKind::UnsupportedType(output_type)));
             }
         };
         self.visiting_outputs.remove(path);
@@ -2051,10 +2044,7 @@ impl<'a> Encoder<'a> {
             });
         }
 
-        for declaration in self.source.paths() {
-            let Some(state) = self.outputs.get(declaration.path()) else {
-                continue;
-            };
+        for (path, state) in &self.outputs {
             let Some(edit) = &state.edit else {
                 continue;
             };
@@ -2064,7 +2054,7 @@ impl<'a> Encoder<'a> {
             cost = cost
                 .checked_add(state.cost)
                 .ok_or_else(|| error(SolveErrorKind::IntegerCostOverflow))?;
-            let before = match self.request.output_values().get(declaration.path()) {
+            let before = match self.request.output_values().get(path) {
                 Some(value) => value.clone(),
                 None => self.decode_optional_output(
                     model,
@@ -2075,7 +2065,7 @@ impl<'a> Encoder<'a> {
             let after =
                 self.decode_optional_output(model, &state.actual_present, &state.actual_value)?;
             outputs.push(OutputChange {
-                path: declaration.path().clone(),
+                path: path.clone(),
                 before,
                 after,
                 cost: state.cost,
@@ -2232,6 +2222,9 @@ fn collect_universes(
     for declaration in model.paths() {
         register_set_types(declaration.ty(), &mut universes);
     }
+    for virtual_output in request.virtual_outputs().values() {
+        register_set_types(&virtual_output.ty, &mut universes);
+    }
     for expression in model.expressions() {
         if let ExpressionKind::Constant(value) = expression.kind() {
             collect_constant_universe(expression.ty(), value, &mut universes);
@@ -2248,13 +2241,13 @@ fn collect_universes(
         }
     }
     for goal in request.goals() {
-        collect_goal_constant_universe(model, goal, &mut universes);
+        collect_goal_constant_universe(model, request, goal, &mut universes);
     }
     for constraint in request.constraints() {
         let (first, second) = constraint_predicates(constraint);
-        collect_goal_constant_universe(model, first, &mut universes);
+        collect_goal_constant_universe(model, request, first, &mut universes);
         if let Some(second) = second {
-            collect_goal_constant_universe(model, second, &mut universes);
+            collect_goal_constant_universe(model, request, second, &mut universes);
         }
     }
     for exclusion in request.excluded_candidates() {
@@ -2293,13 +2286,13 @@ fn collect_enum_universes(
         }
     }
     for goal in request.goals() {
-        collect_goal_enum_universe(model, goal, &mut universes);
+        collect_goal_enum_universe(model, request, goal, &mut universes);
     }
     for constraint in request.constraints() {
         let (first, second) = constraint_predicates(constraint);
-        collect_goal_enum_universe(model, first, &mut universes);
+        collect_goal_enum_universe(model, request, first, &mut universes);
         if let Some(second) = second {
-            collect_goal_enum_universe(model, second, &mut universes);
+            collect_goal_enum_universe(model, request, second, &mut universes);
         }
     }
     for exclusion in request.excluded_candidates() {
@@ -2328,20 +2321,37 @@ fn constraint_predicates(constraint: &OutputConstraint) -> (&OutputGoal, Option<
     }
 }
 
+fn goal_output_type<'model>(
+    model: &'model ConstraintModel,
+    request: &'model SolveRequest,
+    path: &OutputPath,
+) -> Option<&'model Type> {
+    model
+        .path(path)
+        .map(|declaration| declaration.ty())
+        .or_else(|| {
+            request
+                .virtual_outputs()
+                .get(path)
+                .map(|virtual_output| &virtual_output.ty)
+        })
+}
+
 fn collect_goal_constant_universe(
     model: &ConstraintModel,
+    request: &SolveRequest,
     goal: &OutputGoal,
     universes: &mut Vec<(Type, Vec<Constant>)>,
 ) {
     match goal {
         OutputGoal::Equals { path, value } => {
-            if let Some(declaration) = model.path(path) {
-                collect_constant_universe(declaration.ty(), value, universes);
+            if let Some(ty) = goal_output_type(model, request, path) {
+                collect_constant_universe(ty, value, universes);
             }
         }
         OutputGoal::Contains { path, value } | OutputGoal::NotContains { path, value } => {
-            if let Some(declaration) = model.path(path)
-                && let Type::List(element) | Type::Set(element) = declaration.ty()
+            if let Some(Type::List(element) | Type::Set(element)) =
+                goal_output_type(model, request, path)
             {
                 collect_constant_universe(element, value, universes);
             }
@@ -2352,18 +2362,19 @@ fn collect_goal_constant_universe(
 
 fn collect_goal_enum_universe(
     model: &ConstraintModel,
+    request: &SolveRequest,
     goal: &OutputGoal,
     universes: &mut Vec<(Type, Vec<VariantId>)>,
 ) {
     match goal {
         OutputGoal::Equals { path, value } => {
-            if let Some(declaration) = model.path(path) {
-                collect_enum_constant(declaration.ty(), value, universes);
+            if let Some(ty) = goal_output_type(model, request, path) {
+                collect_enum_constant(ty, value, universes);
             }
         }
         OutputGoal::Contains { path, value } | OutputGoal::NotContains { path, value } => {
-            if let Some(declaration) = model.path(path)
-                && let Type::List(element) | Type::Set(element) = declaration.ty()
+            if let Some(Type::List(element) | Type::Set(element)) =
+                goal_output_type(model, request, path)
             {
                 collect_enum_constant(element, value, universes);
             }

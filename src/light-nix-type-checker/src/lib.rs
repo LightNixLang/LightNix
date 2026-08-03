@@ -10,4 +10,4 @@ pub use checker::{
     TypeEnvironment, check_module,
 };
 pub use error::{TypeCheckError, TypeCheckErrorKind};
-pub use types::{FunctionType, InterfaceBound, Type, TypeScheme, TypeVariableId};
+pub use types::{FunctionType, InterfaceBound, MutationPolicy, Type, TypeScheme, TypeVariableId};

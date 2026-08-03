@@ -93,12 +93,7 @@ pub enum Constant {
     Enum(VariantId),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum MutationPolicy {
-    Readonly,
-    Tunable { cost: u64 },
-}
+pub use light_nix_type_checker::MutationPolicy;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]

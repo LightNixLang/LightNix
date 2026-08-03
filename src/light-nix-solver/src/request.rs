@@ -1,6 +1,17 @@
 use std::{collections::HashMap, time::Duration};
 
-use light_nix_ir::{Constant, OutputPath, VariableId};
+use light_nix_ir::{Constant, MutationPolicy, OutputPath, VariableId};
+use light_nix_type_checker::Type;
+
+/// A schema-backed output path that has no claim in the analysed source.
+/// Declaring it lets the solver propose inserting a brand-new claim (or prove
+/// that no insertion can satisfy the request) with the ownership policy the
+/// schema assigns to that option.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VirtualOutput {
+    pub ty: Type,
+    pub policy: MutationPolicy,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -35,6 +46,7 @@ pub(crate) struct ExcludedCandidate {
 pub struct SolveRequest {
     variable_values: HashMap<VariableId, Constant>,
     output_values: HashMap<OutputPath, Option<Constant>>,
+    virtual_outputs: HashMap<OutputPath, VirtualOutput>,
     goals: Vec<OutputGoal>,
     constraints: Vec<OutputConstraint>,
     excluded_candidates: Vec<ExcludedCandidate>,
@@ -53,6 +65,16 @@ impl SolveRequest {
 
     pub fn set_output_value(&mut self, path: OutputPath, value: Option<Constant>) -> &mut Self {
         self.output_values.insert(path, value);
+        self
+    }
+
+    pub fn declare_virtual_output(
+        &mut self,
+        path: OutputPath,
+        ty: Type,
+        policy: MutationPolicy,
+    ) -> &mut Self {
+        self.virtual_outputs.insert(path, VirtualOutput { ty, policy });
         self
     }
 
@@ -104,6 +126,10 @@ impl SolveRequest {
 
     pub fn output_values(&self) -> &HashMap<OutputPath, Option<Constant>> {
         &self.output_values
+    }
+
+    pub fn virtual_outputs(&self) -> &HashMap<OutputPath, VirtualOutput> {
+        &self.virtual_outputs
     }
 
     pub fn goals(&self) -> &[OutputGoal] {
