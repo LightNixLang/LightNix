@@ -85,6 +85,7 @@ pub enum Constant {
     Int(i64),
     Float(f64),
     String(String),
+    Package(String),
     List(Vec<Constant>),
     Set(Vec<Constant>),
     AttrSet(BTreeMap<String, Constant>),

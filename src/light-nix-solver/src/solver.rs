@@ -32,6 +32,7 @@ enum EncodedValue {
     Int(Int),
     Real(Real),
     String(Z3String),
+    Package(Z3String),
     Enum(Int),
     List {
         element_type: Type,
@@ -1376,6 +1377,13 @@ impl<'a> Encoder<'a> {
                     })
                 })?)
             }
+            (Type::Package, Constant::Package(value)) => {
+                EncodedValue::Package(Z3String::from_str(value).map_err(|_| {
+                    error(SolveErrorKind::InvalidConstant {
+                        expected: ty.clone(),
+                    })
+                })?)
+            }
             (Type::Named(_, _), Constant::Enum(variant)) => {
                 EncodedValue::Enum(Int::from_u64(variant_number(*variant)))
             }
@@ -1519,6 +1527,7 @@ impl<'a> Encoder<'a> {
             Type::Int => Ok(EncodedValue::Int(Int::new_const(name))),
             Type::Float => Ok(EncodedValue::Real(Real::new_const(name))),
             Type::String => Ok(EncodedValue::String(Z3String::new_const(name))),
+            Type::Package => Ok(EncodedValue::Package(Z3String::new_const(name))),
             Type::Named(_, _) => {
                 let value = Int::new_const(name);
                 let variants = self.enum_universe(ty);
@@ -1605,6 +1614,9 @@ impl<'a> Encoder<'a> {
             Type::String => Ok(EncodedValue::String(
                 Z3String::from_str("").expect("empty Z3 string is valid"),
             )),
+            Type::Package => Ok(EncodedValue::Package(
+                Z3String::from_str("").expect("empty Z3 string is valid"),
+            )),
             Type::Named(_, _) => Ok(EncodedValue::Enum(Int::from_i64(0))),
             Type::List(element_type) => Ok(EncodedValue::List {
                 element_type: element_type.as_ref().clone(),
@@ -1646,6 +1658,7 @@ impl<'a> Encoder<'a> {
             (EncodedValue::Int(left), EncodedValue::Int(right)) => left.eq(right),
             (EncodedValue::Real(left), EncodedValue::Real(right)) => left.eq(right),
             (EncodedValue::String(left), EncodedValue::String(right)) => left.eq(right),
+            (EncodedValue::Package(left), EncodedValue::Package(right)) => left.eq(right),
             (EncodedValue::Enum(left), EncodedValue::Enum(right)) => left.eq(right),
             (
                 EncodedValue::List {
@@ -1788,6 +1801,9 @@ impl<'a> Encoder<'a> {
             }
             (EncodedValue::String(left), EncodedValue::String(right)) => {
                 EncodedValue::String(condition.ite(left, right))
+            }
+            (EncodedValue::Package(left), EncodedValue::Package(right)) => {
+                EncodedValue::Package(condition.ite(left, right))
             }
             (EncodedValue::Enum(left), EncodedValue::Enum(right)) => {
                 EncodedValue::Enum(condition.ite(left, right))
@@ -2133,6 +2149,12 @@ impl<'a> Encoder<'a> {
                     .and_then(|value| value.as_string())
                     .ok_or_else(|| error(SolveErrorKind::ModelValueUnavailable))?,
             )),
+            EncodedValue::Package(value) => Ok(Constant::Package(
+                model
+                    .eval(value, true)
+                    .and_then(|value| value.as_string())
+                    .ok_or_else(|| error(SolveErrorKind::ModelValueUnavailable))?,
+            )),
             EncodedValue::Enum(value) => {
                 let number = model
                     .eval(value, true)
@@ -2418,6 +2440,7 @@ fn register_set_types(ty: &Type, universes: &mut Vec<(Type, Vec<Constant>)>) {
         | Type::Int
         | Type::Float
         | Type::String
+        | Type::Package
         | Type::Parameter(_)
         | Type::Variable(_) => {}
     }
@@ -2598,6 +2621,7 @@ fn constants_equal(left: &Constant, right: &Constant) -> bool {
         (Constant::Int(left), Constant::Int(right)) => left == right,
         (Constant::Float(left), Constant::Float(right)) => left.to_bits() == right.to_bits(),
         (Constant::String(left), Constant::String(right)) => left == right,
+        (Constant::Package(left), Constant::Package(right)) => left == right,
         (Constant::Enum(left), Constant::Enum(right)) => left == right,
         (Constant::Optional(left), Constant::Optional(right)) => match (left, right) {
             (None, None) => true,
@@ -2631,6 +2655,7 @@ fn constant_matches(value: &Constant, ty: &Type) -> bool {
         | (Constant::Bool(_), Type::Bool)
         | (Constant::Int(_), Type::Int)
         | (Constant::String(_), Type::String)
+        | (Constant::Package(_), Type::Package)
         | (Constant::Enum(_), Type::Named(_, _)) => true,
         (Constant::Float(value), Type::Float) => value.is_finite(),
         (Constant::List(values), Type::List(element)) => {
@@ -2655,6 +2680,7 @@ fn encoded_type(value: &EncodedValue) -> Type {
         EncodedValue::Int(_) => Type::Int,
         EncodedValue::Real(_) => Type::Float,
         EncodedValue::String(_) => Type::String,
+        EncodedValue::Package(_) => Type::Package,
         EncodedValue::Enum(_) => Type::Error,
         EncodedValue::List { element_type, .. } => Type::List(Box::new(element_type.clone())),
         EncodedValue::Set { element_type, .. } => Type::Set(Box::new(element_type.clone())),

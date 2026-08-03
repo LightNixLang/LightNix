@@ -1174,9 +1174,11 @@ impl<'ast, 'input, 'allocator, 'context> Lowerer<'ast, 'input, 'allocator, 'cont
             },
             Value::String(string) => match decode_string(string.value) {
                 Ok(string) => {
-                    let result =
-                        self.builder
-                            .constant(ty.clone(), Constant::String(string), origin);
+                    let constant = match &ty {
+                        Type::Package => Constant::Package(string),
+                        _ => Constant::String(string),
+                    };
+                    let result = self.builder.constant(ty.clone(), constant, origin);
                     LoweredValue {
                         expression: self.finish_expression(result, ty, value.span()),
                         path: None,

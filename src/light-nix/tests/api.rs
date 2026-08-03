@@ -464,6 +464,83 @@ let observedDevice = fileSystems["/"].device
 }
 
 #[test]
+fn package_literals_are_typed_by_expectation_and_planned_as_package_atoms() {
+    let source = r#"
+type Environment {
+    packages: Set<Package>
+}
+let tunable(cost = 3) packages: Set<Package> = @set ["firefox"]
+declare let environment: Environment
+environment.packages = packages
+"#;
+    let arena = AstArena::new();
+    let analysis = analyze_module(source, &arena, ModuleId(0), &AnalysisEnvironment::default());
+    assert!(
+        analysis.is_success(),
+        "parse={:?}\nname={:?}\ntype={:?}\ndependency={:?}\nlower={:?}",
+        analysis.parse_errors(),
+        analysis.name_errors(),
+        analysis.type_errors(),
+        analysis.dependency_errors(),
+        analysis.lower_errors(),
+    );
+    let path = analysis
+        .output_path("environment.packages")
+        .expect("packages output")
+        .clone();
+
+    let evaluated = light_nix::evaluator::evaluate_module(
+        analysis.source(),
+        analysis.resolution(),
+        analysis.types(),
+        &EvaluationInputs::default(),
+    );
+    assert_eq!(
+        evaluated.snapshot().get(&path).map(|entry| &entry.value),
+        Some(&RuntimeValue::Set(vec![RuntimeValue::Package(
+            "firefox".to_owned()
+        )]))
+    );
+
+    let mut request = PlanningRequest::new();
+    request.require_member(path.clone(), Constant::Package("kitty".to_owned()));
+
+    let PlanOutcome::Applicable(plan) = analysis
+        .plan(&EvaluationInputs::default(), &request)
+        .unwrap()
+    else {
+        panic!("expected an applicable plan");
+    };
+    assert_eq!(plan.solution().cost, 3);
+    assert_eq!(plan.solution().variables.len(), 1);
+    assert_eq!(
+        plan.after().get(&path).map(|entry| &entry.value),
+        Some(&RuntimeValue::Set(vec![
+            RuntimeValue::Package("firefox".to_owned()),
+            RuntimeValue::Package("kitty".to_owned()),
+        ]))
+    );
+    assert!(plan.side_effects().next().is_none());
+    assert!(!plan.requires_confirmation());
+}
+
+#[test]
+fn string_collections_do_not_flow_into_package_positions() {
+    let source = r#"
+type Environment {
+    packages: Set<Package>
+}
+let packages = @set ["firefox"]
+declare let environment: Environment
+environment.packages = packages
+"#;
+    let arena = AstArena::new();
+    let analysis = analyze_module(source, &arena, ModuleId(0), &AnalysisEnvironment::default());
+    assert!(!analysis.is_success());
+    assert!(!analysis.type_errors().is_empty());
+}
+
+#[test]
 fn union_safe_cast_and_elvis_are_tracked_through_z3() {
     let source = r#"
 type Result {

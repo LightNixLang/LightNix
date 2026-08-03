@@ -510,6 +510,7 @@ fn runtime_to_constant(value: &RuntimeValue) -> Option<Constant> {
         RuntimeValue::Int(value) => Some(Constant::Int(*value)),
         RuntimeValue::Float(value) => Some(Constant::Float(*value)),
         RuntimeValue::String(value) => Some(Constant::String(value.clone())),
+        RuntimeValue::Package(value) => Some(Constant::Package(value.clone())),
         RuntimeValue::List(values) => values
             .iter()
             .map(runtime_to_constant)
@@ -546,6 +547,7 @@ fn constant_to_runtime(value: &Constant) -> Result<RuntimeValue, PlanError> {
         Constant::Int(value) => RuntimeValue::Int(*value),
         Constant::Float(value) => RuntimeValue::Float(*value),
         Constant::String(value) => RuntimeValue::String(value.clone()),
+        Constant::Package(value) => RuntimeValue::Package(value.clone()),
         Constant::List(values) => RuntimeValue::List(
             values
                 .iter()

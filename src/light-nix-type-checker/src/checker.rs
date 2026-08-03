@@ -312,6 +312,7 @@ struct Checker<'ast, 'input, 'allocator, 'context, 'environment> {
     capabilities: Vec<Capability>,
     assumptions: Vec<InterfaceBound>,
     current_return: Option<Type>,
+    package_literals: HashSet<AstId<'ast>>,
     errors: Vec<TypeCheckError>,
 }
 
@@ -364,6 +365,7 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
             capabilities: Vec::new(),
             assumptions: Vec::new(),
             current_return: None,
+            package_literals: HashSet::new(),
             errors: Vec::new(),
         }
     }
@@ -948,10 +950,56 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
     ) {
         match value {
             AssignValue::Expression(expression) => {
+                self.promote_expression_literals(expected, expression);
                 let found = self.infer_expression(expression);
                 self.assign_at(expected, &found, expression.span());
             }
             AssignValue::Nested(nested) => self.check_nested_assignment(expected, nested),
+        }
+    }
+
+    /// Interprets string literals against the expected type of an assignment
+    /// or annotated let binding, so that `"firefox"` in a `Package` position
+    /// denotes a package reference rather than a string.  Only literal-shaped
+    /// syntax is descended: promotion never applies to variables, accesses,
+    /// calls, or the results of control flow.
+    fn promote_expression_literals(
+        &mut self,
+        expected: &Type,
+        expression: &'ast Expression<'input, 'allocator>,
+    ) {
+        let Expression::Primary(primary) = expression else {
+            return;
+        };
+        if !primary.accesses.is_empty() {
+            return;
+        }
+        self.promote_value_literals(expected, &primary.value);
+    }
+
+    fn promote_value_literals(&mut self, expected: &Type, value: &'ast Value<'input, 'allocator>) {
+        let expected = self.unifier.resolve(expected);
+        match (&expected, value) {
+            (Type::Package, Value::String(_)) => {
+                self.package_literals
+                    .insert(AstId::new(value, AstKind::Value));
+            }
+            (Type::Set(element) | Type::List(element), Value::Array(array)) => {
+                for element_value in array.values {
+                    self.promote_value_literals(element, element_value);
+                }
+            }
+            (Type::Optional(inner), Value::Some(some)) => {
+                let inner = inner.as_ref().clone();
+                if let Some(inner_expression) = some.value {
+                    self.promote_expression_literals(&inner, inner_expression);
+                }
+            }
+            (Type::Optional(inner), _) => {
+                let inner = inner.as_ref().clone();
+                self.promote_value_literals(&inner, value);
+            }
+            _ => {}
         }
     }
 
@@ -1005,6 +1053,9 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
             .map(|scheme| scheme.ty.clone())
             .unwrap_or(Type::Error);
         if let Some(value) = node.value {
+            if node.type_info.is_some() {
+                self.promote_expression_literals(&expected, value);
+            }
             let found = self.infer_expression(value);
             self.assign_at(&expected, &found, value.span());
         } else if node.type_info.is_none() {
@@ -1498,7 +1549,16 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
                 let float = number.value.contains(['.', 'e', 'E']);
                 PrimaryState::Value(if float { Type::Float } else { Type::Int })
             }
-            Value::String(_) => PrimaryState::Value(Type::String),
+            Value::String(_) => PrimaryState::Value(
+                if self
+                    .package_literals
+                    .contains(&AstId::new(value, AstKind::Value))
+                {
+                    Type::Package
+                } else {
+                    Type::String
+                },
+            ),
             Value::Boolean(_) => PrimaryState::Value(Type::Bool),
             Value::Null(_) => {
                 let inner = self.unifier.fresh();
@@ -1816,6 +1876,8 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
                 PrimaryState::Value(ty) => ty,
                 _ => Type::Error,
             };
+            self.value_types
+                .insert(AstId::new(value, AstKind::Value), found.clone());
             element = Some(element.map_or(found.clone(), |current| self.join_at(&current, &found)));
         }
         let element = Box::new(element.unwrap_or_else(|| self.unifier.fresh()));
@@ -2350,6 +2412,7 @@ impl<'ast, 'input, 'allocator, 'context, 'environment>
             BuiltinType::Int => Type::Int,
             BuiltinType::Float => Type::Float,
             BuiltinType::String => Type::String,
+            BuiltinType::Package => Type::Package,
             BuiltinType::List => Type::List(Box::new(parameters.remove(0))),
             BuiltinType::Set => Type::Set(Box::new(parameters.remove(0))),
             BuiltinType::AttrSet => Type::AttrSet(Box::new(parameters.remove(0))),
@@ -3507,6 +3570,56 @@ implements First for Int | String {}
                     .errors()
                     .iter()
                     .any(|error| error.kind == TypeCheckErrorKind::UnionImplementationTarget)
+            );
+        });
+    }
+
+    #[test]
+    fn package_expectation_promotes_literals_but_never_variables() {
+        let source = r#"
+type Environment {
+    packages: Set<Package>
+    single: Package
+    fallback: Package?
+}
+let packages: Set<Package> = @set ["firefox"]
+let names = @set ["firefox"]
+declare let environment: Environment
+environment.packages = packages
+environment.single = "kitty"
+environment.fallback = some("mozc")
+let invalid: Set<Package> = names
+"#;
+        check_source(source, |ast, resolution, result| {
+            assert_eq!(result.errors().len(), 1, "{:#?}", result.errors());
+            assert!(
+                matches!(
+                    &result.errors()[0].kind,
+                    TypeCheckErrorKind::TypeMismatch { expected, found }
+                        if *expected == Type::Package && *found == Type::String
+                ),
+                "{:#?}",
+                result.errors()
+            );
+            let Statement::LetStatement(packages) = ast.statements[1] else {
+                panic!("expected packages binding");
+            };
+            let Statement::LetStatement(names) = ast.statements[2] else {
+                panic!("expected names binding");
+            };
+            assert_eq!(
+                result
+                    .symbol_type(symbol_of(resolution, &packages.name))
+                    .unwrap()
+                    .ty,
+                Type::Set(Box::new(Type::Package))
+            );
+            assert_eq!(
+                result
+                    .symbol_type(symbol_of(resolution, &names.name))
+                    .unwrap()
+                    .ty,
+                Type::Set(Box::new(Type::String))
             );
         });
     }

@@ -10,6 +10,7 @@ pub enum RuntimeValue {
     Int(i64),
     Float(f64),
     String(String),
+    Package(String),
     List(Vec<RuntimeValue>),
     Set(Vec<RuntimeValue>),
     AttrSet(BTreeMap<String, RuntimeValue>),
@@ -30,6 +31,7 @@ impl PartialEq for RuntimeValue {
             (Self::Int(left), Self::Int(right)) => left == right,
             (Self::Float(left), Self::Float(right)) => left == right,
             (Self::String(left), Self::String(right)) => left == right,
+            (Self::Package(left), Self::Package(right)) => left == right,
             (Self::List(left), Self::List(right)) => left == right,
             (Self::Set(left), Self::Set(right)) => {
                 left.iter()

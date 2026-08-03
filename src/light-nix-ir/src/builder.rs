@@ -639,6 +639,7 @@ fn constant_matches(value: &Constant, ty: &Type) -> bool {
         (Constant::Int(_), Type::Int) => true,
         (Constant::Float(value), Type::Float) => value.is_finite(),
         (Constant::String(_), Type::String) => true,
+        (Constant::Package(_), Type::Package) => true,
         (Constant::List(values), Type::List(element)) => {
             values.iter().all(|value| constant_matches(value, element))
         }

@@ -612,6 +612,7 @@ impl<'ast, 'input, 'allocator, 'context, 'inputs>
             (RuntimeValue::Int(_), Type::Int) => true,
             (RuntimeValue::Float(_), Type::Float) => true,
             (RuntimeValue::String(_), Type::String) => true,
+            (RuntimeValue::Package(_), Type::Package) => true,
             (RuntimeValue::List(values), Type::List(element)) => values
                 .iter()
                 .all(|value| self.runtime_matches_type(value, element)),
@@ -831,7 +832,12 @@ impl<'ast, 'input, 'allocator, 'context, 'inputs>
                     })
             }
             Value::String(string) => decode_string(string.value)
-                .map(|value| TrackedValue::pure(RuntimeValue::String(value)))
+                .map(|decoded| {
+                    TrackedValue::pure(match self.types.value_type(value) {
+                        Some(Type::Package) => RuntimeValue::Package(decoded),
+                        _ => RuntimeValue::String(decoded),
+                    })
+                })
                 .map_err(|kind| {
                     self.errors.push(EvaluationError {
                         kind,
