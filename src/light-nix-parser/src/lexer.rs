@@ -139,10 +139,8 @@ pub enum TokenKind {
     LineFeed,
     /// ' '
     Whitespace,
-    /// // comment or /* comment */
+    /// `# comment` (statement-attached) or `/* header */` (file header only)
     Comment,
-    /// /// document
-    Document,
     UnexpectedCharacter,
     None,
 }
@@ -235,10 +233,8 @@ static TOKENIZERS: &[Tokenizer] = &[
     // String literals
     Tokenizer::Regex(TokenKind::StringLiteral, r#""(?:[^"\\]|\\.)*""#),
     Tokenizer::Regex(TokenKind::StringLiteral, r"'(?:[^'\\]|\\.)*'"),
-    // Document comment
-    Tokenizer::Regex(TokenKind::Document, r"///[^\n\r]*(?:\r\n|\n|\r|$)"),
-    // Comments
-    Tokenizer::Regex(TokenKind::Comment, r"//[^\n\r]*"),
+    // Line comments attach to statements; block comments are the file header.
+    Tokenizer::Regex(TokenKind::Comment, r"#[^\n\r]*"),
     Tokenizer::Regex(TokenKind::Comment, r"(?s:/\*.*?\*/)"),
     // Line feeds and whitespace
     Tokenizer::Regex(TokenKind::LineFeed, r"\r\n|\n|\r"),
@@ -329,6 +325,10 @@ impl<'input> Lexer<'input> {
             ignore_whitespace: true,
             ignore_comment: true,
         }
+    }
+
+    pub fn source(&self) -> &'input str {
+        self.source
     }
 
     pub fn current(&mut self) -> Option<Token<'input>> {

@@ -18,6 +18,7 @@ use std::ops::Range;
 
 use light_nix_parser::{
     ast::{AST, AssignValue, AstArena, Statement},
+    comments::attach_comments,
     lexer::Lexer,
     parser::{ParseErrors, parse_source},
 };
@@ -85,13 +86,25 @@ pub fn format_source(input: &str) -> Result<String, FormatError> {
         });
     }
 
+    let comments = attach_comments(input, source, &lexer.comments);
+
     let mut entries = Vec::new();
-    for statement in source.statements {
+    for (index, statement) in source.statements.iter().enumerate() {
         let span = statement.span();
-        let text = input[span].trim().to_owned();
+        let statement_text = input[span].trim();
+        let mut text = String::new();
+        for comment in &comments.leading[index] {
+            text.push_str(input[comment.clone()].trim_end());
+            text.push('\n');
+        }
+        text.push_str(statement_text);
+        if let Some(trailing) = &comments.trailing[index] {
+            text.push(' ');
+            text.push_str(input[trailing.clone()].trim_end());
+        }
         let (group, key) = match statement {
-            Statement::ImportStatement(_) => (Group::Imports, Some(text.clone())),
-            Statement::UseDeclare(_) => (Group::Uses, Some(text.clone())),
+            Statement::ImportStatement(_) => (Group::Imports, Some(statement_text.to_owned())),
+            Statement::UseDeclare(_) => (Group::Uses, Some(statement_text.to_owned())),
             Statement::EnumDefine(_)
             | Statement::TypeDefine(_)
             | Statement::InterfaceDefine(_)
@@ -111,17 +124,41 @@ pub fn format_source(input: &str) -> Result<String, FormatError> {
     // key is `None` and wherever keys tie.
     entries.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
 
-    let mut output = String::new();
+    let mut blocks: Vec<String> = Vec::new();
+    if !comments.header.is_empty() {
+        blocks.push(
+            comments
+                .header
+                .iter()
+                .map(|comment| input[comment.clone()].trim())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
     let mut previous_group = None;
     for (group, _, text) in &entries {
         match previous_group {
-            None => {}
-            Some(previous) if previous == *group => output.push('\n'),
-            Some(_) => output.push_str("\n\n"),
+            Some(previous) if previous == *group => {
+                let block = blocks.last_mut().expect("a group block is open");
+                block.push('\n');
+                block.push_str(text);
+            }
+            _ => blocks.push(text.clone()),
         }
-        output.push_str(text);
         previous_group = Some(*group);
     }
+    if !comments.footer.is_empty() {
+        blocks.push(
+            comments
+                .footer
+                .iter()
+                .map(|comment| input[comment.clone()].trim_end())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+
+    let mut output = blocks.join("\n\n");
     if !output.is_empty() {
         output.push('\n');
     }
@@ -260,5 +297,55 @@ let second = first
         let input = "let a = 1\nprograms.zsh.enable = true\nprograms.firefox.enable = true\n";
         let edits = format_edits(input).unwrap();
         assert_eq!(apply_edits(input, &edits), format_source(input).unwrap());
+    }
+
+    #[test]
+    fn comments_travel_with_their_statements_when_claims_are_sorted() {
+        let input = r#"programs.zsh.enable = true # trailing zsh
+
+# firefox is the default browser
+programs.firefox.enable = true
+"#;
+        let formatted = format_source(input).unwrap();
+        assert_eq!(
+            formatted,
+            r#"# firefox is the default browser
+programs.firefox.enable = true
+programs.zsh.enable = true # trailing zsh
+"#
+        );
+    }
+
+    #[test]
+    fn header_footer_and_floating_comments_have_deterministic_owners() {
+        let input = r#"/* SPDX-License-Identifier: MIT */
+
+# floats above with a blank line, still owned by the claim below
+
+programs.firefox.enable = true
+
+# orphaned at the end of the file
+"#;
+        let formatted = format_source(input).unwrap();
+        assert_eq!(
+            formatted,
+            r#"/* SPDX-License-Identifier: MIT */
+
+# floats above with a blank line, still owned by the claim below
+programs.firefox.enable = true
+
+# orphaned at the end of the file
+"#
+        );
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+    }
+
+    #[test]
+    fn block_comments_outside_the_header_are_parse_errors() {
+        let input = "programs.firefox.enable = true\n/* not a header */\n";
+        assert!(matches!(
+            format_source(input),
+            Err(FormatError::Parse { .. })
+        ));
     }
 }

@@ -173,19 +173,21 @@ fn expression_span(
 }
 
 /// The span of the whole `a.b = c` statement carrying the claim, for row
-/// deletion.  Only a top-level assignment with a plain expression value can
-/// be deleted this way; a nested assignment block carries sibling claims.
+/// deletion — extended to cover the statement's attached comments, which a
+/// deleted row takes with it.  Only a top-level assignment with a plain
+/// expression value can be deleted this way; a nested assignment block
+/// carries sibling claims.
 fn claim_statement_span(
     analysis: &ModuleAnalysis<'_, '_>,
     path: &OutputPath,
 ) -> Result<std::ops::Range<usize>, EditError> {
     let value = unconditional_claim_value(analysis, path)?;
     let value_span = expression_span(analysis, value)?;
-    for statement in analysis.source().statements {
+    for (index, statement) in analysis.source().statements.iter().enumerate() {
         let Statement::AssignStatement(node) = statement else {
             continue;
         };
-        let span = node.span.clone();
+        let mut span = node.span.clone();
         if span.start > value_span.start || span.end < value_span.end {
             continue;
         }
@@ -193,6 +195,13 @@ fn claim_statement_span(
             return Err(unrepresentable(
                 "the claim lives in a nested assignment block; deleting it would touch siblings",
             ));
+        }
+        let comments = analysis.comments();
+        if let Some(first) = comments.leading.get(index).and_then(|leading| leading.first()) {
+            span.start = span.start.min(first.start);
+        }
+        if let Some(Some(trailing)) = comments.trailing.get(index) {
+            span.end = span.end.max(trailing.end);
         }
         return Ok(span);
     }

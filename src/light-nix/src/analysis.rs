@@ -10,6 +10,7 @@ use light_nix_name_resolver::{
 };
 use light_nix_parser::{
     ast::{AstArena, Source},
+    comments::{CommentMap, attach_comments},
     error::ParseError,
     lexer::Lexer,
     parser::{ParseErrors, parse_source},
@@ -77,6 +78,7 @@ impl AnalysisEnvironment {
 pub struct ModuleAnalysis<'input, 'allocator> {
     source: &'allocator Source<'input, 'allocator>,
     parse_errors: ParseErrors<'input, 'allocator>,
+    comments: CommentMap,
     resolution: NameResolution<'allocator>,
     types: TypeCheckResult<'allocator>,
     dependencies: DependencyGraph,
@@ -90,6 +92,11 @@ impl<'input, 'allocator> ModuleAnalysis<'input, 'allocator> {
 
     pub fn parse_errors(&self) -> &[ParseError<'input, 'allocator>] {
         &self.parse_errors
+    }
+
+    /// Which statement owns each comment of the module.
+    pub fn comments(&self) -> &CommentMap {
+        &self.comments
     }
 
     pub fn resolution(&self) -> &NameResolution<'allocator> {
@@ -303,6 +310,7 @@ pub fn analyze_module<'input, 'allocator>(
     let mut lexer = Lexer::new(input);
     let mut parse_errors = ParseErrors::new_in(arena);
     let source = parse_source(&mut lexer, &mut parse_errors, arena);
+    let comments = attach_comments(input, source, &lexer.comments);
     let resolution = collect_module(source, module).resolve(environment.imports());
     let types = check_module(source, &resolution, environment.types());
     let mut dependencies = build_dependency_graph(source, &resolution);
@@ -311,6 +319,7 @@ pub fn analyze_module<'input, 'allocator>(
     ModuleAnalysis {
         source,
         parse_errors,
+        comments,
         resolution,
         types,
         dependencies,

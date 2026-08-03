@@ -205,6 +205,38 @@ audio.pulseaudio = true
 }
 
 #[test]
+fn deleting_a_claim_takes_its_attached_comments_along() {
+    let source = r#"type Audio {
+    tunable(cost = 1) pipewire: Bool
+    tunable(cost = 1) pulseaudio: Bool
+}
+declare let audio: Audio
+
+audio.pipewire = true
+
+# temporary until the migration finishes
+audio.pulseaudio = true # remove me
+"#;
+    let arena = AstArena::new();
+    let analysis = analyze(source, &arena);
+    let pulseaudio = analysis.output_path("audio.pulseaudio").expect("path");
+    let mut request = PlanningRequest::new();
+    request.require_output_absent(pulseaudio);
+    let PlanOutcome::Applicable(plan) = analysis
+        .plan(&EvaluationInputs::default(), &request)
+        .unwrap()
+    else {
+        panic!("expected an applicable plan");
+    };
+
+    let written = apply_plan(&analysis, &plan, source).unwrap();
+    assert!(!written.contains("audio.pulseaudio"), "{written}");
+    assert!(!written.contains("temporary until"), "{written}");
+    assert!(!written.contains("remove me"), "{written}");
+    assert!(written.contains("audio.pipewire = true"), "{written}");
+}
+
+#[test]
 fn a_plan_that_changes_nothing_produces_no_edits() {
     let arena = AstArena::new();
     let analysis = analyze(FIREFOX_SCHEMA, &arena);

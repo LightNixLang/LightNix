@@ -8,7 +8,16 @@ mod grammar {
     bnf_rules! {
         #[generate_code = false]
 
-        source               ::= statements
+        // Comments are owned, never free-floating trivia:
+        //   - "/* ... */" is the module header.  Its position (before the
+        //     first statement) is a grammar rule; elsewhere it is an error.
+        //   - "# ..." line comments are valid exactly where a line break is
+        //     valid and always end at one, so they live inside the "lf"
+        //     terminal below.  Which statement owns each comment (leading /
+        //     trailing / footer) is a semantic rule; see parser::comments.
+        source               ::= { header_comment } statements
+        header_comment       ::= block_comment lf
+        block_comment        ::= r"(?s:/\*.*?\*/)"
 
         statements           ::= [ lf_or_semicolons ] { statement lf_or_semicolons }
         statement            ::= import_statement
@@ -64,9 +73,9 @@ mod grammar {
                                  | "tunable" [ "(" "cost" "=" integer_literal ")" ]
 
         assign_statement     ::= primary "=" [ lf ] assign_value
-        assign_value         ::= expression | nested_assignment
-        nested_assignment    ::= "{" [ lf ] { nested_assignment_field lf_or_comma } "}"
-        nested_assignment_field ::= literal "=" [ lf ] assign_value
+        assign_value         ::= expression | nested_assign
+        nested_assign        ::= "{" [ lf ] { nested_assign_field lf_or_comma } "}"
+        nested_assign_field  ::= literal "=" [ lf ] assign_value
 
         function_define      ::= [ "export" ] method_define
         method_define        ::= function_attribute "function" literal [ generic_parameters ]
@@ -158,6 +167,11 @@ mod grammar {
 
         lf_or_semicolons     ::= lf_or_semicolon { lf_or_semicolon }
         lf_or_semicolon      ::= lf | ";"
-        lf                   ::= r"(\n|\r|\r\n)+"
+        // One token per line-break run: an optional trailing "#" comment,
+        // then one or more newlines, each optionally followed by an
+        // indented full-line "#" comment.  Keeping the whole run a single
+        // token is what keeps the grammar LR(1): a run of blank and comment
+        // lines can never be split two ways.
+        lf                   ::= r"(#[^\n\r]*)?((\r\n|\n|\r)[ \t\u{3000}]*(#[^\n\r]*)?)+"
     }
 }

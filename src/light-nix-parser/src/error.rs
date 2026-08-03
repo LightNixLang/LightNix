@@ -83,6 +83,8 @@ pub enum Expected {
     SetModifier,
     IntegerLiteral,
     AccessMember,
+    /// A `#` line comment: suggested wherever a block comment is misplaced.
+    LineComment,
     Token(TokenKind),
 }
 
@@ -129,6 +131,8 @@ pub enum ParseErrorKind {
     NonClosedBracket,
     NonClosedParenthesis,
     NonClosedTypeParameter,
+    /// `/* ... */` is reserved for the file header; use `#` elsewhere.
+    MisplacedBlockComment,
     UnexpectedToken,
 }
 

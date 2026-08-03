@@ -43,10 +43,7 @@ pub(crate) fn is_statement_start(kind: TokenKind) -> bool {
 }
 
 pub(crate) fn skip_line_feed(lexer: &mut Lexer<'_>) {
-    while matches!(
-        current_kind(lexer),
-        TokenKind::LineFeed | TokenKind::Document
-    ) {
+    while matches!(current_kind(lexer), TokenKind::LineFeed) {
         lexer.next();
     }
 }
@@ -56,7 +53,7 @@ pub(crate) fn skip_statement_separator(lexer: &mut Lexer<'_>) -> bool {
 
     while matches!(
         current_kind(lexer),
-        TokenKind::LineFeed | TokenKind::Semicolon | TokenKind::Document
+        TokenKind::LineFeed | TokenKind::Semicolon
     ) {
         skipped = true;
         lexer.next();
@@ -70,7 +67,7 @@ pub(crate) fn skip_list_separator(lexer: &mut Lexer<'_>) -> bool {
 
     while matches!(
         current_kind(lexer),
-        TokenKind::LineFeed | TokenKind::Comma | TokenKind::Document
+        TokenKind::LineFeed | TokenKind::Comma
     ) {
         skipped = true;
         lexer.next();

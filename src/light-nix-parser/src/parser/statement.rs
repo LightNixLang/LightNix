@@ -11,7 +11,7 @@ use crate::{
         StringLiteral, TypeDefine, TypeInfo, Typedef, TypedefBlock, TypedefValue, UseDeclare,
         WhereClause, WherePredicate,
     },
-    error::{Expected, ParseErrorKind, Scope, error_here, recover_until},
+    error::{Expected, ParseError, ParseErrorKind, Scope, error_here, recover_until},
     lexer::{Lexer, TokenKind},
 };
 
@@ -26,7 +26,19 @@ pub fn parse_source<'input, 'allocator>(
     allocator: &'allocator Bump,
 ) -> &'allocator Source<'input, 'allocator> {
     let statements = parse_statements(lexer, errors, allocator, false);
-    allocator.alloc(statements)
+    let source = allocator.alloc(statements);
+    for span in
+        crate::comments::misplaced_block_comments(lexer.source(), source, &lexer.comments)
+    {
+        errors.push(ParseError {
+            kind: ParseErrorKind::MisplacedBlockComment,
+            scope: Scope::Source,
+            expected: Expected::LineComment,
+            error_tokens: &[],
+            span,
+        });
+    }
+    source
 }
 
 fn parse_statements<'input, 'allocator>(
@@ -1348,10 +1360,7 @@ fn parse_assert_statement<'input, 'allocator>(
     lexer.next();
 
     let message_anchor = lexer.cast_anchor();
-    let message_follows_separator = matches!(
-        current_kind(lexer),
-        TokenKind::LineFeed | TokenKind::Document
-    );
+    let message_follows_separator = matches!(current_kind(lexer), TokenKind::LineFeed);
     skip_line_feed(lexer);
     let message = parse_expression(lexer, errors, allocator);
     if message.is_none() {
