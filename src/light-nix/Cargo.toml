@@ -9,5 +9,6 @@ light-nix-name-resolver = { path = "../light-nix-name-resolver", version = "0.1.
 light-nix-dependency-graph = { path = "../light-nix-dependency-graph", version = "0.1.0" }
 light-nix-evaluator = { path = "../light-nix-evaluator", version = "0.1.0" }
 light-nix-ir = { path = "../light-nix-ir", version = "0.1.0" }
+light-nix-formatter = { path = "../light-nix-formatter", version = "0.1.0" }
 light-nix-solver = { path = "../light-nix-solver", version = "0.1.0" }
 light-nix-type-checker = { path = "../light-nix-type-checker", version = "0.1.0" }

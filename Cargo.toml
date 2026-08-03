@@ -8,6 +8,7 @@ members = [
     "src/light-nix-name-resolver",
     "src/light-nix-dependency-graph",
     "src/light-nix-evaluator",
+    "src/light-nix-formatter",
     "src/light-nix-ir",
     "src/light-nix-solver",
     "src/light-nix-type-checker"
